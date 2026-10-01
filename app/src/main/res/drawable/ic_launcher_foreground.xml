@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Content kept inside the 66dp safe zone (21..87). -->
+    <path
+        android:fillColor="#FFF2B33D"
+        android:pathData="M56,32c-9.2,1.9 -16,10 -16,19.8c0,11.1 9,20.2 20.2,20.2c9.8,0 18,-7 19.8,-16.2C80,68.6 70.2,76 58.6,76C46.1,76 36,65.9 36,53.4C36,42.6 44.5,33.4 56,32z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M66,38l1.2,3.3l3.3,1.2l-3.3,1.2L66,47l-1.2,-3.3l-3.3,-1.2l3.3,-1.2z" />
+</vector>

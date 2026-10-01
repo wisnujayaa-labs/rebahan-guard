@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Rebahan Guard</string>
+    <string name="notif_channel">Penjaga rebahan</string>
+    <string name="notif_watching">Mengawasi posisi HP-mu</string>
+    <string name="notif_alarm">Ketahuan main HP sambil rebahan! Duduk dulu.</string>
+    <string name="action_stop">Matikan</string>
+</resources>
