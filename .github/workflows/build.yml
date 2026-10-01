@@ -43,9 +43,7 @@ jobs:
       - name: Unit tests (incl. fuzz tests)
         run: ./gradlew testDebugUnitTest
 
-      - name: Android lint
-        run: ./gradlew lintDebug
-
+      # Build and publish the APK before lint, so a lint finding never blocks getting the app.
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
@@ -56,6 +54,31 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
+      - name: Android lint
+        run: ./gradlew lintDebug
+
+      # Turn lint findings into annotations so they are readable on the public run page,
+      # without downloading the report.
+      - name: Annotate lint findings
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          for path in glob.glob("app/build/reports/lint-results-debug.xml") + glob.glob("app/build/intermediates/lint_intermediate_text_report/**/*.xml", recursive=True):
+              try:
+                  root = ET.parse(path).getroot()
+              except Exception as e:
+                  print(f"could not parse {path}: {e}")
+                  continue
+              for issue in root.iter("issue"):
+                  level = "error" if issue.get("severity") in ("Error", "Fatal") else "warning"
+                  loc = issue.find("location")
+                  file = loc.get("file", "") if loc is not None else ""
+                  line = loc.get("line", "1") if loc is not None else "1"
+                  msg = f'[{issue.get("id")}] {issue.get("message")}'.replace("\n", " ")
+                  print(f"::{level} file={file},line={line}::{msg}")
+          PY
+
       - name: Upload test and lint reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,5 +86,5 @@ jobs:
           name: reports
           path: |
             app/build/reports/tests/
-            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.*
           retention-days: 14
