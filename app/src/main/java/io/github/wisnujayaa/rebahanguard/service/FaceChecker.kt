@@ -55,6 +55,12 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
         val s = Session(onResult)
         session = s
 
+        // Start the clock immediately, not after the camera opens: if the camera provider
+        // never becomes ready, the check still ends on time.
+        val timeout = Runnable { finish(s) }
+        s.timeout = timeout
+        mainHandler.postDelayed(timeout, config.cameraWindowMs)
+
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             if (s.done) return@addListener
@@ -73,10 +79,6 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, useCase)
                 analysis = useCase
-
-                val timeout = Runnable { finish(s) }
-                s.timeout = timeout
-                mainHandler.postDelayed(timeout, config.cameraWindowMs)
             } catch (e: Exception) {
                 // Camera busy (e.g. a video call), no front camera, permission revoked...
                 Log.w(TAG, "Camera check failed", e)
@@ -95,23 +97,35 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
 
         val rotation = proxy.imageInfo.rotationDegrees
         val uprightWidth = if (rotation % 180 == 0) proxy.width else proxy.height
-        val input = InputImage.fromMediaImage(mediaImage, rotation)
+        if (uprightWidth <= 0) {
+            proxy.close()
+            return
+        }
 
-        detector.process(input)
-            .addOnSuccessListener { faces ->
-                val largest = faces.maxByOrNull { it.boundingBox.width() } ?: return@addOnSuccessListener
-                val observation = FaceObservation(
-                    faceWidthRatio = largest.boundingBox.width().toFloat() / uprightWidth,
-                    rollDeg = largest.headEulerAngleZ,
-                )
-                mainHandler.post { onObservation(s, observation) }
-            }
-            .addOnFailureListener { e -> Log.w(TAG, "Face detection failed", e) }
-            .addOnCompleteListener { proxy.close() }
+        try {
+            val input = InputImage.fromMediaImage(mediaImage, rotation)
+            detector.process(input)
+                .addOnSuccessListener { faces ->
+                    val largest = faces.maxByOrNull { it.boundingBox.width() }
+                        ?: return@addOnSuccessListener
+                    val observation = FaceObservation(
+                        faceWidthRatio = largest.boundingBox.width().toFloat() / uprightWidth,
+                        rollDeg = largest.headEulerAngleZ,
+                    )
+                    mainHandler.post { onObservation(s, observation) }
+                }
+                .addOnFailureListener { e -> Log.w(TAG, "Face detection failed", e) }
+                .addOnCompleteListener { proxy.close() }
+        } catch (e: Exception) {
+            // e.g. the detector was closed by release() while this frame was in flight.
+            // Never let an exception escape the analysis thread: that would crash the app.
+            Log.w(TAG, "Could not analyse frame", e)
+            proxy.close()
+        }
     }
 
     private fun onObservation(s: Session, observation: FaceObservation) {
-        if (s.done) return
+        if (s.done || !observation.isValid) return
         val best = s.best
         if (best == null || observation.faceWidthRatio > best.faceWidthRatio) s.best = observation
         // A clearly visible face is enough evidence — stop early to save battery.

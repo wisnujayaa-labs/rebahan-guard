@@ -7,6 +7,10 @@ package io.github.wisnujayaa.rebahanguard.core
  * so every decision in the app waits for the signal to be stable first.
  */
 class Debouncer(private val holdMs: Long) {
+    init {
+        require(holdMs >= 0) { "holdMs must be >= 0, was $holdMs" }
+    }
+
     private var trueSince: Long? = null
 
     /** Returns true once [condition] has been continuously true for at least [holdMs]. */
@@ -15,7 +19,12 @@ class Debouncer(private val holdMs: Long) {
             trueSince = null
             return false
         }
-        val since = trueSince ?: nowMs.also { trueSince = it }
+        val since = trueSince
+        if (since == null || nowMs < since) {
+            // First true sample, or the clock went backwards: start counting from now.
+            trueSince = nowMs
+            return holdMs == 0L
+        }
         return nowMs - since >= holdMs
     }
 

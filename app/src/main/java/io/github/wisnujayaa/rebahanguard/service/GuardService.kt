@@ -1,5 +1,6 @@
 package io.github.wisnujayaa.rebahanguard.service
 
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -26,8 +27,9 @@ import io.github.wisnujayaa.rebahanguard.core.Action
 import io.github.wisnujayaa.rebahanguard.core.FaceObservation
 import io.github.wisnujayaa.rebahanguard.core.GuardConfig
 import io.github.wisnujayaa.rebahanguard.core.GuardEngine
+import io.github.wisnujayaa.rebahanguard.core.GravityFilter
 import io.github.wisnujayaa.rebahanguard.core.Phase
-import io.github.wisnujayaa.rebahanguard.core.PoseClassifier
+import io.github.wisnujayaa.rebahanguard.core.SensorInput
 
 /**
  * Foreground service (type = camera) that glues the hardware to [GuardEngine]:
@@ -43,14 +45,18 @@ class GuardService : LifecycleService(), SensorEventListener {
     private lateinit var alarm: AlarmPlayer
     private lateinit var sensorManager: SensorManager
 
+    private lateinit var keyguardManager: KeyguardManager
+
     private var gravitySensor: Sensor? = null
-    private var usingAccelerometerFallback = false
-    private val filteredGravity = FloatArray(3)
+    private var accelerometerFilter: GravityFilter? = null
     private var sensorsRegistered = false
     private var started = false
 
+    // All engine access happens on the main thread (sensor callbacks, this receiver and camera
+    // results are all delivered there), so the engine needs no locking.
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            if (!started) return
             when (intent.action) {
                 Intent.ACTION_SCREEN_ON -> {
                     registerSensors()
@@ -81,18 +87,25 @@ class GuardService : LifecycleService(), SensorEventListener {
         }
         started = true
 
-        val delaySec = intent?.getIntExtra(EXTRA_DELAY_SEC, DEFAULT_DELAY_SEC) ?: DEFAULT_DELAY_SEC
+        // Even our own intents are treated as untrusted input: clamp before use.
+        val delaySec = SensorInput.sanitizeDelaySec(
+            intent?.getIntExtra(EXTRA_DELAY_SEC, DEFAULT_DELAY_SEC) ?: DEFAULT_DELAY_SEC
+        )
         config = GuardConfig(triggerDelayMs = delaySec * 1_000L)
         engine = GuardEngine(config)
         faceChecker = FaceChecker(this, config)
         alarm = AlarmPlayer(this)
 
+        keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
         if (gravitySensor == null) {
             // Some cheap phones have no fused gravity sensor: low-pass the accelerometer instead.
             gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-            usingAccelerometerFallback = true
+            accelerometerFilter = GravityFilter()
+        }
+        if (gravitySensor == null) {
+            Log.e(TAG, "No gravity or accelerometer sensor on this device")
         }
 
         ContextCompat.registerReceiver(
@@ -144,16 +157,12 @@ class GuardService : LifecycleService(), SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        val (x, y, z) = if (usingAccelerometerFallback) {
-            // Low-pass filter: keep 90% of the old value, add 10% of the new one. Hand jitter
-            // averages out, the slow-changing gravity component remains.
-            for (i in 0..2) filteredGravity[i] = 0.9f * filteredGravity[i] + 0.1f * event.values[i]
-            Triple(filteredGravity[0], filteredGravity[1], filteredGravity[2])
-        } else {
-            Triple(event.values[0], event.values[1], event.values[2])
-        }
+        if (!started) return
+        val filter = accelerometerFilter
+        val values = if (filter != null) filter.update(event.values) else event.values
 
-        val pose = PoseClassifier.classify(x, y, z)
+        // On the lock screen the user is not using the phone: never trigger the camera there.
+        val pose = SensorInput.toPose(values, deviceLocked = keyguardManager.isKeyguardLocked)
         perform(engine.onPose(pose, SystemClock.elapsedRealtime()))
         publish()
     }
@@ -179,6 +188,10 @@ class GuardService : LifecycleService(), SensorEventListener {
     }
 
     private fun onFaceResult(face: FaceObservation?) {
+        if (!started) return
+        // A late result (after a watchdog timeout or screen-off) is ignored by the engine;
+        // don't show it in the UI either.
+        if (engine.phase != Phase.CHECKING) return
         perform(engine.onFaceResult(face, SystemClock.elapsedRealtime()))
         val lastCheck = LastCheck(
             atMillis = System.currentTimeMillis(),
@@ -242,6 +255,7 @@ class GuardService : LifecycleService(), SensorEventListener {
 
     override fun onDestroy() {
         if (started) {
+            started = false // late callbacks (sensor, camera) become no-ops from here on
             unregisterSensors()
             unregisterReceiver(screenReceiver)
             alarm.stop()

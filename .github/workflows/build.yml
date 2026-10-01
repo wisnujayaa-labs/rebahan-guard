@@ -6,11 +6,28 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: this workflow only needs to read the code. Even if a malicious pull request
+# or a compromised build step ran here, the token could not push code or change the repo.
+permissions:
+  contents: read
+
+# A newer push cancels an older, still-running build of the same branch.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Supply-chain check: refuse to run a gradle-wrapper.jar that isn't an official
+      # Gradle release (a tampered wrapper would execute arbitrary code during the build).
+      - uses: gradle/actions/wrapper-validation@v4
 
       - uses: actions/setup-java@v4
         with:
@@ -19,8 +36,11 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Unit tests
+      - name: Unit tests (incl. fuzz tests)
         run: ./gradlew testDebugUnitTest
+
+      - name: Android lint
+        run: ./gradlew lintDebug
 
       - name: Build debug APK
         run: ./gradlew assembleDebug
@@ -30,10 +50,14 @@ jobs:
         with:
           name: RebahanGuard-apk
           path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
 
-      - name: Upload test report
-        if: failure()
+      - name: Upload test and lint reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-report
-          path: app/build/reports/tests/
+          name: reports
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
+          retention-days: 14

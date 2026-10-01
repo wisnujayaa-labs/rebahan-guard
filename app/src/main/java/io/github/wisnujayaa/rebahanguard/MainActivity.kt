@@ -2,9 +2,12 @@ package io.github.wisnujayaa.rebahanguard
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -29,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -37,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import io.github.wisnujayaa.rebahanguard.core.Phase
 import io.github.wisnujayaa.rebahanguard.core.Pose
+import io.github.wisnujayaa.rebahanguard.core.SensorInput
 import io.github.wisnujayaa.rebahanguard.service.GuardService
 import io.github.wisnujayaa.rebahanguard.service.GuardStatus
 import io.github.wisnujayaa.rebahanguard.service.GuardStatusStore
@@ -69,14 +74,24 @@ private fun GuardScreen(modifier: Modifier = Modifier) {
     val status by GuardStatusStore.status.collectAsState()
     val prefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
     var delaySec by remember {
-        mutableFloatStateOf(prefs.getInt(KEY_DELAY, GuardService.DEFAULT_DELAY_SEC).toFloat())
+        // Stored settings are untrusted (corrupted file, older app version): clamp them.
+        val stored = SensorInput.sanitizeDelaySec(
+            prefs.getInt(KEY_DELAY, GuardService.DEFAULT_DELAY_SEC)
+        )
+        mutableFloatStateOf(stored.toFloat())
     }
+    var cameraDenied by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { granted ->
         if (granted[Manifest.permission.CAMERA] == true) {
+            cameraDenied = false
             GuardService.start(context, delaySec.roundToInt())
+        } else {
+            // After "Don't ask again" Android returns instantly with no dialog: tell the user
+            // why nothing happened instead of failing silently.
+            cameraDenied = true
         }
     }
 
@@ -117,7 +132,7 @@ private fun GuardScreen(modifier: Modifier = Modifier) {
                     onValueChangeFinished = {
                         prefs.edit().putInt(KEY_DELAY, delaySec.roundToInt()).apply()
                     },
-                    valueRange = 5f..120f,
+                    valueRange = SensorInput.MIN_DELAY_SEC.toFloat()..SensorInput.MAX_DELAY_SEC.toFloat(),
                     enabled = !status.running,
                 )
                 if (status.running) {
@@ -137,6 +152,26 @@ private fun GuardScreen(modifier: Modifier = Modifier) {
         } else {
             Button(onClick = { startGuard() }, modifier = Modifier.fillMaxWidth()) {
                 Text("Aktifkan penjaga")
+            }
+        }
+
+        if (cameraDenied) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                ),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Izin kamera ditolak. Tanpa kamera, aplikasi tidak bisa memastikan kamu " +
+                            "sedang rebahan.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    OutlinedButton(onClick = { openAppSettings(context) }) {
+                        Text("Buka pengaturan izin")
+                    }
+                }
             }
         }
 
@@ -204,6 +239,14 @@ private fun poseLabel(pose: Pose) = when (pose) {
     Pose.FACE_UP -> "datar, layar ke atas"
     Pose.TILTED -> "agak miring"
     Pose.UNKNOWN -> "membaca sensor…"
+}
+
+private fun openAppSettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null),
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
 }
 
 private fun requiredPermissions(): List<String> = buildList {

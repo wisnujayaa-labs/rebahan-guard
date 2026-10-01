@@ -61,7 +61,9 @@ stateDiagram-v2
     WATCHING --> CHECKING: suspicious pose held ≥ delay
     CHECKING --> ALARMING: face confirms lying
     CHECKING --> COOLDOWN: no face / not lying
+    CHECKING --> COOLDOWN: watchdog, camera never answered
     ALARMING --> WATCHING: normal pose held 1.5 s
+    ALARMING --> COOLDOWN: rang for 60 s (hard limit)
     COOLDOWN --> WATCHING: cool-down over or user sat up
     WATCHING --> WATCHING: screen off resets everything
 ```
@@ -74,6 +76,7 @@ All decisions live in pure Kotlin (`core/`, zero Android imports), so they are c
 app/src/main/java/io/github/wisnujayaa/rebahanguard/
 ├── core/                 # Pure logic, unit-tested
 │   ├── Pose.kt           #   gravity vector → Pose
+│   ├── SensorInput.kt    #   input sanitising, lock-screen rule, accelerometer filter
 │   ├── Debouncer.kt      #   "true for N ms" filter
 │   ├── LyingJudge.kt     #   sensor fusion: pose + face → lying?
 │   └── GuardEngine.kt    #   state machine, emits Actions
@@ -88,12 +91,35 @@ app/src/main/java/io/github/wisnujayaa/rebahanguard/
 
 The engine never touches hardware: it returns an `Action` (`START_CAMERA_CHECK`, `START_ALARM`, …) and the service performs it. This keeps the logic testable and the Android layer thin.
 
-## Privacy
+## Security & privacy
 
-- Face detection runs **entirely on the device**, using ML Kit's model hosted in Google Play services. The manifest explicitly **removes the `INTERNET` permission** that ML Kit's telemetry library would add, so this app has no network access and camera frames cannot be sent anywhere.
-- The *unbundled* model was chosen on purpose: the bundled variant ships native libraries that have been [reported](https://github.com/googlesamples/mlkit/issues/1024) to fail on newer devices that use 16 KB memory pages.
-- Frames are analysed in memory and dropped immediately; nothing is saved.
-- The camera is used for at most ~3 s per check, and Android's green camera indicator shows every time.
+| Threat / risk | Mitigation |
+|---|---|
+| Camera images leaking | Frames analysed in memory and dropped; nothing saved. The manifest **removes `INTERNET`** (which ML Kit's telemetry would add), so the app cannot send anything anywhere. |
+| Silent camera use | Camera on only ≤ 4 s per check, only after a suspicious pose, never on the lock screen; Android's green indicator always shows. |
+| Other apps controlling the service | Service and screen receiver are **not exported**; notification `PendingIntent`s are explicit and `FLAG_IMMUTABLE`. |
+| Malformed input (sensor glitches, NaN/∞, corrupted settings, intent extras) | Everything is validated or clamped at the boundary (`SensorInput`, `FaceObservation.isValid`, `GuardConfig` `require`s). Invalid data is always treated as *not lying*: fail-safe, never a false alarm. |
+| App stuck or annoying | Watchdog ends a camera check that never answers; the alarm stops by itself after 60 s; screen-off stops everything. |
+| Crash on a background thread | Frame analysis catches every exception; alarm sound and vibration fail independently. |
+| Supply chain (CI) | Workflow token is read-only, Gradle wrapper is checksum-validated, Dependabot proposes dependency updates. |
+| Native-library crashes on 16 KB-page devices | Uses the *unbundled* ML Kit model; the bundled variant has been [reported](https://github.com/googlesamples/mlkit/issues/1024) to fail on such devices. |
+
+`allowBackup` is off, and the only stored data is the delay setting.
+
+## Testing
+
+All decision logic is pure Kotlin, so it is tested on the JVM in well under a second.
+
+| Suite | What it covers |
+|---|---|
+| `PoseClassifierTest` | Known poses, NaN/∞/zero/huge readings, 100 000 random vectors checked against the math, scale invariance |
+| `LyingJudgeTest` | Sensor fusion rules, exact boundaries, garbage detector output, angle math on 100 000 random angles |
+| `SensorInputTest`, `GravityFilterTest` | Malformed events, lock screen, setting clamping, filter priming, glitch recovery |
+| `DebouncerTest`, `GuardConfigTest` | Timing, clock going backwards, invalid configuration |
+| `GuardEngineTest` | Full cycles plus unexpected situations: camera never answers, late/duplicate results, alarm limit, flickering pose, timestamp overflow |
+| `GuardEngineFuzzTest` | ~1.2 million random events against a fake phone that tracks the real camera/alarm state, asserting safety invariants after every event (camera never started twice, alarm only after a positive check, every alarm stopped exactly once, nothing stuck), including a run where the clock jumps backwards |
+
+**Mutation testing** was used to check that the tests themselves are strong: ten realistic bugs (no watchdog, no alarm limit, trusting NaN faces, lock-screen triggering, cooldown overflow, …) were re-inserted one at a time, and the suite caught **9/10**. The survivor turned out to be an *equivalent mutant*: a redundant NaN check whose removal doesn't change behaviour, because a second check also catches it.
 
 ## Android platform constraints (and how they're handled)
 
@@ -103,14 +129,15 @@ The engine never touches hardware: it returns an `Action` (`START_CAMERA_CHECK`,
 | A system restart of the service would happen from the background and fail | `START_NOT_STICKY`; user re-enables from the app |
 | Background apps don't receive continuous sensor events | Foreground service keeps sensor access |
 | Battery | Sensors unregister when the screen turns off; camera only on suspicion; 60 s cool-down |
+| Phones without Google Play services | Face checks fail gracefully (treated as "no face"); the app keeps running |
 
 ## Known limitations / roadmap
 
 - [ ] Lying on your stomach (phone face-up) is not detected yet — idea: proximity sensor + pitch angle
 - [ ] Very dark rooms can make face detection fail (screen light usually helps)
+- [ ] Instrumented (on-device) tests for the service and camera layer
 - [ ] Some OEM battery savers (Xiaomi, Oppo, vivo) may kill the service — whitelist the app
 - [ ] Schedule (only active at night), statistics of "caught" events
-- [ ] Instrumented tests for `FaceChecker`
 
 ## Build & install
 
@@ -123,7 +150,8 @@ The engine never touches hardware: it returns an `Action` (`START_CAMERA_CHECK`,
 Local build (needs JDK 17 + Android SDK):
 
 ```bash
-./gradlew testDebugUnitTest   # pure-logic unit tests
+./gradlew testDebugUnitTest   # unit + fuzz tests
+./gradlew lintDebug           # Android lint
 ./gradlew assembleDebug       # → app/build/outputs/apk/debug/app-debug.apk
 ```
 
