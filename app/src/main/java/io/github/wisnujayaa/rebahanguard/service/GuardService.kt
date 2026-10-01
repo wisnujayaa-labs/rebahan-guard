@@ -14,6 +14,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -132,7 +133,13 @@ class GuardService : LifecycleService(), SensorEventListener {
             this,
             NOTIFICATION_ID,
             buildNotification(getString(R.string.notif_watching)),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA,
+            // The "camera" service type only exists from Android 11 (API 30). On Android 10,
+            // passing an unknown type would make startForeground() throw.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            } else {
+                0
+            },
         )
         true
     } catch (e: Exception) {

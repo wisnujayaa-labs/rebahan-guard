@@ -4,6 +4,7 @@
 
 *Rebahan* is Indonesian for "lying around". Scrolling while lying down quietly eats into sleep, so this app catches it with **sensor fusion**: a cheap gravity sensor watches all the time, and the front camera only switches on for a few seconds to confirm.
 
+[![Build APK](https://github.com/wisnujayaa-labs/rebahan-guard/actions/workflows/build.yml/badge.svg)](https://github.com/wisnujayaa-labs/rebahan-guard/actions/workflows/build.yml)
 ![Android](https://img.shields.io/badge/Android-10%2B-3DDC84?logo=android&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF?logo=kotlin&logoColor=white)
 ![Jetpack Compose](https://img.shields.io/badge/Jetpack%20Compose-Material%203-4285F4)
