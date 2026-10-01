@@ -37,20 +37,41 @@ class GravityFilter(private val smoothing: Float = 0.9f) {
 
 object SensorInput {
     /**
-     * Turns one sensor event into a [Pose], defending against malformed events.
+     * Turns one sensor event into an [Orientation], defending against malformed events.
      *
      * @param deviceLocked while the lock screen is showing, the user is not "using" the phone,
-     *   so the pose is reported as [Pose.UNKNOWN] and nothing is ever triggered.
+     *   so the orientation is reported as unknown and nothing is ever triggered.
      */
-    fun toPose(values: FloatArray?, deviceLocked: Boolean): Pose {
-        if (deviceLocked) return Pose.UNKNOWN
-        if (values == null || values.size < 3) return Pose.UNKNOWN
-        return PoseClassifier.classify(values[0], values[1], values[2])
+    fun toOrientation(
+        values: FloatArray?,
+        deviceLocked: Boolean,
+        lyingElevationDeg: Float = PoseClassifier.DEFAULT_LYING_ELEVATION_DEG,
+    ): Orientation {
+        if (deviceLocked) return Orientation.UNKNOWN
+        if (values == null || values.size < 3) return Orientation.UNKNOWN
+        return PoseClassifier.measure(values[0], values[1], values[2], lyingElevationDeg)
     }
+
+    fun toPose(values: FloatArray?, deviceLocked: Boolean): Pose =
+        toOrientation(values, deviceLocked).pose
 
     const val MIN_DELAY_SEC = 5
     const val MAX_DELAY_SEC = 120
 
     /** Settings and intent extras are untrusted input: clamp them into the supported range. */
     fun sanitizeDelaySec(raw: Int): Int = raw.coerceIn(MIN_DELAY_SEC, MAX_DELAY_SEC)
+
+    /**
+     * Allowed range for the "looking up at the phone" threshold. Below -60° only extreme poses
+     * count; above +30° ordinary sitting (looking down at the phone) would trigger checks.
+     */
+    const val MIN_LYING_ELEVATION_DEG = -60f
+    const val MAX_LYING_ELEVATION_DEG = 30f
+
+    fun sanitizeLyingElevationDeg(raw: Float): Float =
+        if (!raw.isFinite()) {
+            PoseClassifier.DEFAULT_LYING_ELEVATION_DEG
+        } else {
+            raw.coerceIn(MIN_LYING_ELEVATION_DEG, MAX_LYING_ELEVATION_DEG)
+        }
 }

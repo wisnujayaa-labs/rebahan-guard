@@ -1,6 +1,8 @@
 package io.github.wisnujayaa.rebahanguard.core
 
 import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.atan2
 import kotlin.math.sqrt
 
 /**
@@ -13,7 +15,11 @@ import kotlin.math.sqrt
  * A phone lying flat face-up on a table reads roughly (0, 0, +9.81).
  */
 enum class Pose(val isSuspicious: Boolean) {
-    /** Screen points at the floor: typical when lying on your back holding the phone overhead. */
+    /**
+     * Screen tilted toward the floor (beyond the configured threshold): the user is BELOW the
+     * phone looking up at it — on their back, or propped up on a pillow with the phone held
+     * upright in front of them. When sitting, people look DOWN at their phone instead.
+     */
     FACE_DOWN(isSuspicious = true),
 
     /** Long edge pointing down, screen roughly vertical: typical when lying on your side. */
@@ -33,15 +39,55 @@ enum class Pose(val isSuspicious: Boolean) {
     UNKNOWN(isSuspicious = false),
 }
 
+/**
+ * A pose plus the two angles it was derived from.
+ *
+ * @param screenElevationDeg where the screen faces: +90 = ceiling, 0 = straight ahead
+ *   (screen vertical), -90 = floor.
+ * @param inPlaneRotationDeg how far the phone is turned around the screen's normal:
+ *   0 = upright portrait, ±90 = on its side, ±180 = upside down. NaN when the screen is almost
+ *   flat, because "upright" is meaningless for a phone lying on a table.
+ */
+data class Orientation(
+    val pose: Pose,
+    val screenElevationDeg: Float,
+    val inPlaneRotationDeg: Float,
+) {
+    companion object {
+        val UNKNOWN = Orientation(Pose.UNKNOWN, Float.NaN, Float.NaN)
+
+        /** Typical angles for a pose, for callers (and tests) that only know the pose. */
+        fun of(pose: Pose): Orientation = Orientation(
+            pose = pose,
+            screenElevationDeg = when (pose) {
+                Pose.FACE_DOWN -> -60f
+                Pose.FACE_UP -> 60f
+                Pose.TILTED -> 30f
+                Pose.UNKNOWN -> Float.NaN
+                else -> 0f
+            },
+            inPlaneRotationDeg = when (pose) {
+                Pose.UPRIGHT -> 0f
+                Pose.SIDEWAYS -> 90f
+                Pose.UPSIDE_DOWN -> 180f
+                else -> Float.NaN
+            },
+        )
+    }
+}
+
 object PoseClassifier {
+    /**
+     * Default threshold: a screen facing even slightly toward the floor (-5°) counts as
+     * "looking up at the phone". Users can calibrate this to their own habits.
+     */
+    const val DEFAULT_LYING_ELEVATION_DEG = -5f
+
     /** Readings whose magnitude is below this are ignored (gravity should be ~9.81). */
     private const val MIN_MAGNITUDE = 1.0f
 
     /** Far above Earth gravity: a shake or an impact, not a resting orientation. */
     private const val MAX_MAGNITUDE = 50.0f
-
-    /** z-share below this means the screen faces down by more than ~30°. */
-    private const val FACE_DOWN_Z = -0.5f
 
     /** x-share above this means a long edge points toward the floor (~45° or more). */
     private const val SIDEWAYS_X = 0.7f
@@ -51,27 +97,49 @@ object PoseClassifier {
 
     private const val AXIS_DOMINANT = 0.7f
 
-    fun classify(x: Float, y: Float, z: Float): Pose {
+    /** Below this share of gravity in the screen plane, in-plane rotation is undefined. */
+    private const val MIN_IN_PLANE_SHARE = 0.3f
+
+    private const val RAD_TO_DEG = (180.0 / Math.PI).toFloat()
+
+    fun classify(
+        x: Float,
+        y: Float,
+        z: Float,
+        lyingElevationDeg: Float = DEFAULT_LYING_ELEVATION_DEG,
+    ): Pose = measure(x, y, z, lyingElevationDeg).pose
+
+    fun measure(
+        x: Float,
+        y: Float,
+        z: Float,
+        lyingElevationDeg: Float = DEFAULT_LYING_ELEVATION_DEG,
+    ): Orientation {
         // A glitching sensor can report NaN or Infinity. Never treat that as a real pose.
-        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return Pose.UNKNOWN
+        if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return Orientation.UNKNOWN
 
         val magnitude = sqrt(x * x + y * y + z * z)
         if (!magnitude.isFinite() || magnitude < MIN_MAGNITUDE || magnitude > MAX_MAGNITUDE) {
-            return Pose.UNKNOWN
+            return Orientation.UNKNOWN
         }
 
         // Normalise so each component is "the share of gravity on that axis" (-1..1).
         val nx = x / magnitude
         val ny = y / magnitude
-        val nz = z / magnitude
+        val nz = (z / magnitude).coerceIn(-1f, 1f)
 
-        return when {
-            nz < FACE_DOWN_Z -> Pose.FACE_DOWN
+        val elevation = asin(nz) * RAD_TO_DEG
+        val inPlaneShare = sqrt(nx * nx + ny * ny)
+        val inPlane = if (inPlaneShare >= MIN_IN_PLANE_SHARE) atan2(nx, ny) * RAD_TO_DEG else Float.NaN
+
+        val pose = when {
+            elevation < lyingElevationDeg -> Pose.FACE_DOWN
             abs(nx) > SIDEWAYS_X && abs(nz) < SIDEWAYS_MAX_Z -> Pose.SIDEWAYS
             ny > AXIS_DOMINANT -> Pose.UPRIGHT
             ny < -AXIS_DOMINANT -> Pose.UPSIDE_DOWN
             nz > AXIS_DOMINANT -> Pose.FACE_UP
             else -> Pose.TILTED
         }
+        return Orientation(pose, elevation, inPlane)
     }
 }

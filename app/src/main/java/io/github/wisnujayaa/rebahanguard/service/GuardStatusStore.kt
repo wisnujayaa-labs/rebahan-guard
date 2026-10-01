@@ -11,6 +11,7 @@ data class LastCheck(
     val atMillis: Long,
     val faceWidthRatio: Float?,
     val rollDeg: Float?,
+    val headTiltDeg: Float?,
     val lying: Boolean,
 )
 
@@ -19,6 +20,8 @@ data class GuardStatus(
     val screenOn: Boolean = true,
     val phase: Phase = Phase.WATCHING,
     val pose: Pose = Pose.UNKNOWN,
+    /** Live screen angle (+90 ceiling … -90 floor), shown to help users calibrate. */
+    val screenElevationDeg: Float = Float.NaN,
     val lastCheck: LastCheck? = null,
 )
 

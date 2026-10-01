@@ -16,8 +16,18 @@ data class GuardConfig(
     val checkTimeoutMs: Long = 10_000,
     /** The alarm never rings longer than this in one go (protects roommates and the battery). */
     val maxAlarmMs: Long = 60_000,
+    /** Strict-mode alarms ring in bursts of this length, with a camera re-check in between. */
+    val strictAlarmBurstMs: Long = 5_000,
     val minFaceWidthRatio: Float = 0.20f,
-    val maxSidewaysRollDeg: Float = 45f,
+    /** A head tilted at least this far from vertical (in the screen plane) counts as lying. */
+    val minHeadTiltDeg: Float = 45f,
+    /** Screen elevation below this = "looking up at the phone" (see [Pose.FACE_DOWN]). */
+    val lyingElevationDeg: Float = PoseClassifier.DEFAULT_LYING_ELEVATION_DEG,
+    /**
+     * Strict mode: also check with the camera while the phone is upright/tilted, so lying on
+     * your side with the phone held upright is caught too. Costs more camera checks.
+     */
+    val strictMode: Boolean = false,
 ) {
     init {
         require(triggerDelayMs >= 0) { "triggerDelayMs must be >= 0" }
@@ -26,12 +36,26 @@ data class GuardConfig(
         require(cameraWindowMs > 0) { "cameraWindowMs must be > 0" }
         require(checkTimeoutMs > cameraWindowMs) { "checkTimeoutMs must exceed cameraWindowMs" }
         require(maxAlarmMs > 0) { "maxAlarmMs must be > 0" }
+        require(strictAlarmBurstMs in 1..maxAlarmMs) { "strictAlarmBurstMs must be in (0, maxAlarmMs]" }
         require(minFaceWidthRatio.isFinite() && minFaceWidthRatio > 0f && minFaceWidthRatio <= 1f) {
             "minFaceWidthRatio must be in (0, 1]"
         }
-        require(maxSidewaysRollDeg.isFinite() && maxSidewaysRollDeg >= 0f && maxSidewaysRollDeg < 90f) {
-            "maxSidewaysRollDeg must be in [0, 90)"
+        require(minHeadTiltDeg.isFinite() && minHeadTiltDeg > 0f && minHeadTiltDeg <= 90f) {
+            "minHeadTiltDeg must be in (0, 90]"
         }
+        require(
+            lyingElevationDeg.isFinite() &&
+                lyingElevationDeg >= SensorInput.MIN_LYING_ELEVATION_DEG &&
+                lyingElevationDeg <= SensorInput.MAX_LYING_ELEVATION_DEG
+        ) { "lyingElevationDeg out of range" }
+    }
+
+    /** Whether holding the phone like this should start the countdown to a camera check. */
+    fun isSuspicious(pose: Pose): Boolean =
+        pose.isSuspicious || (strictMode && pose in STRICT_EXTRA_POSES)
+
+    private companion object {
+        val STRICT_EXTRA_POSES = setOf(Pose.UPRIGHT, Pose.UPSIDE_DOWN, Pose.TILTED)
     }
 }
 
@@ -61,6 +85,7 @@ enum class Action { NONE, START_CAMERA_CHECK, CANCEL_CAMERA_CHECK, START_ALARM, 
  * CHECKING ──(no face / not lying / watchdog timeout)──▶ COOLDOWN
  * ALARMING ──(normal pose held ≥ release)──▶ WATCHING
  * ALARMING ──(rang for maxAlarm)──▶ COOLDOWN
+ * ALARMING ──(strict-mode burst over)──▶ WATCHING ──(still suspicious)──▶ CHECKING (no delay)
  * COOLDOWN ──(cooldown over, or user sat up)──▶ WATCHING
  * any      ──(screen off)──▶ WATCHING
  *
@@ -71,20 +96,36 @@ enum class Action { NONE, START_CAMERA_CHECK, CANCEL_CAMERA_CHECK, START_ALARM, 
 class GuardEngine(private val config: GuardConfig = GuardConfig()) {
     var phase: Phase = Phase.WATCHING
         private set
-    var lastPose: Pose = Pose.UNKNOWN
+    var lastOrientation: Orientation = Orientation.UNKNOWN
         private set
+    val lastPose: Pose get() = lastOrientation.pose
 
     private val trigger = Debouncer(config.triggerDelayMs)
     private val release = Debouncer(config.releaseMs)
     private var cooldownUntilMs = 0L
     private var phaseStartedMs = 0L
 
-    fun onPose(pose: Pose, nowMs: Long): Action {
-        lastPose = pose
-        val suspicious = pose.isSuspicious
+    /** The current alarm was caught in a strict-mode-only pose (e.g. phone upright). */
+    private var alarmFromStrictPose = false
+
+    /** Skip the delay once: check with the camera again as soon as possible. */
+    private var recheckSoon = false
+
+    fun onPose(pose: Pose, nowMs: Long): Action = onPose(Orientation.of(pose), nowMs)
+
+    fun onPose(orientation: Orientation, nowMs: Long): Action {
+        lastOrientation = orientation
+        val suspicious = config.isSuspicious(orientation.pose)
 
         return when (phase) {
             Phase.WATCHING -> {
+                if (recheckSoon) {
+                    recheckSoon = false
+                    if (suspicious) {
+                        enter(Phase.CHECKING, nowMs)
+                        return Action.START_CAMERA_CHECK
+                    }
+                }
                 if (trigger.update(suspicious, nowMs)) {
                     enter(Phase.CHECKING, nowMs)
                     Action.START_CAMERA_CHECK
@@ -105,7 +146,19 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
 
             Phase.ALARMING -> {
                 when {
-                    release.update(!suspicious, nowMs) -> {
+                    alarmFromStrictPose -> {
+                        // Sitting up doesn't change an upright phone's pose, so gravity can't tell
+                        // us the user got up. Ring in short bursts and let the camera re-check.
+                        if (elapsedInPhase(nowMs) >= config.strictAlarmBurstMs) {
+                            enter(Phase.WATCHING, nowMs)
+                            recheckSoon = true
+                            Action.STOP_ALARM
+                        } else {
+                            Action.NONE
+                        }
+                    }
+                    // Base poses (screen down / sideways) change when the user sits up.
+                    release.update(!orientation.pose.isSuspicious, nowMs) -> {
                         enter(Phase.WATCHING, nowMs)
                         Action.STOP_ALARM
                     }
@@ -134,7 +187,8 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         // Late, duplicate or unexpected results (e.g. after a screen-off) are ignored.
         if (phase != Phase.CHECKING) return Action.NONE
 
-        return if (LyingJudge.isLying(lastPose, face, config)) {
+        return if (LyingJudge.isLying(lastOrientation, face, config)) {
+            alarmFromStrictPose = !lastOrientation.pose.isSuspicious
             enter(Phase.ALARMING, nowMs)
             Action.START_ALARM
         } else {
@@ -152,8 +206,9 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         }
         trigger.reset()
         release.reset()
+        recheckSoon = false
         phase = Phase.WATCHING
-        lastPose = Pose.UNKNOWN
+        lastOrientation = Orientation.UNKNOWN
         return action
     }
 

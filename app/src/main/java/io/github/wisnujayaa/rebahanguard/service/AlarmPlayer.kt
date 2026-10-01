@@ -4,14 +4,21 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 
-/** Loud, looping alarm + vibration. Played on the ALARM stream so it ignores media volume. */
-class AlarmPlayer(private val context: Context) {
+/**
+ * Loud, looping alarm + vibration. Played on the ALARM stream so it ignores media volume.
+ *
+ * @param soundUri the user's chosen sound (already validated by AlarmSoundPolicy), or null for
+ *   the phone's default alarm. If the chosen sound can't be played (file deleted, permission
+ *   revoked), it falls back to the default instead of staying silent.
+ */
+class AlarmPlayer(private val context: Context, private val soundUri: Uri? = null) {
     private var ringtone: Ringtone? = null
     private var vibrating = false
 
@@ -28,24 +35,10 @@ class AlarmPlayer(private val context: Context) {
     fun start() {
         if (isPlaying) return
 
-        val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-
         // Sound and vibration fail independently: a missing alarm sound (or a sound file the
         // system can't open) must never stop the phone from vibrating, and vice versa.
-        try {
-            ringtone = uri?.let { RingtoneManager.getRingtone(context, it) }?.apply {
-                audioAttributes = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-                isLooping = true
-                play()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Alarm sound failed; vibrating only", e)
-            ringtone = null
-        }
+        ringtone = soundUri?.let { tryPlay(it) } ?: defaultAlarmUri()?.let { tryPlay(it) }
+        if (ringtone == null) Log.w(TAG, "No alarm sound could be played; vibrating only")
 
         try {
             // 0 ms wait, 600 ms buzz, 400 ms pause — repeat from index 0 until stop().
@@ -69,7 +62,27 @@ class AlarmPlayer(private val context: Context) {
         }
     }
 
-    private companion object {
-        const val TAG = "AlarmPlayer"
+    private fun tryPlay(uri: Uri): Ringtone? = try {
+        RingtoneManager.getRingtone(context, uri)?.apply {
+            audioAttributes = alarmAttributes()
+            isLooping = true
+            play()
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not play $uri", e)
+        null
+    }
+
+    companion object {
+        private const val TAG = "AlarmPlayer"
+
+        fun defaultAlarmUri(): Uri? =
+            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+
+        fun alarmAttributes(): AudioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
     }
 }

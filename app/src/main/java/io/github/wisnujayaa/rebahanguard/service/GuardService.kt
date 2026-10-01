@@ -14,6 +14,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
@@ -30,6 +31,9 @@ import io.github.wisnujayaa.rebahanguard.core.GuardConfig
 import io.github.wisnujayaa.rebahanguard.core.GuardEngine
 import io.github.wisnujayaa.rebahanguard.core.GravityFilter
 import io.github.wisnujayaa.rebahanguard.core.Phase
+import io.github.wisnujayaa.rebahanguard.core.AlarmSoundPolicy
+import io.github.wisnujayaa.rebahanguard.core.LyingJudge
+import io.github.wisnujayaa.rebahanguard.core.PoseClassifier
 import io.github.wisnujayaa.rebahanguard.core.SensorInput
 
 /**
@@ -92,10 +96,19 @@ class GuardService : LifecycleService(), SensorEventListener {
         val delaySec = SensorInput.sanitizeDelaySec(
             intent?.getIntExtra(EXTRA_DELAY_SEC, DEFAULT_DELAY_SEC) ?: DEFAULT_DELAY_SEC
         )
-        config = GuardConfig(triggerDelayMs = delaySec * 1_000L)
+        val lyingElevationDeg = SensorInput.sanitizeLyingElevationDeg(
+            intent?.getFloatExtra(EXTRA_LYING_ELEVATION, PoseClassifier.DEFAULT_LYING_ELEVATION_DEG)
+                ?: PoseClassifier.DEFAULT_LYING_ELEVATION_DEG
+        )
+        val alarmSound = AlarmSoundPolicy.sanitize(intent?.getStringExtra(EXTRA_ALARM_URI))
+        config = GuardConfig(
+            triggerDelayMs = delaySec * 1_000L,
+            lyingElevationDeg = lyingElevationDeg,
+            strictMode = intent?.getBooleanExtra(EXTRA_STRICT, false) ?: false,
+        )
         engine = GuardEngine(config)
         faceChecker = FaceChecker(this, config)
-        alarm = AlarmPlayer(this)
+        alarm = AlarmPlayer(this, alarmSound?.let(Uri::parse))
 
         keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -169,8 +182,12 @@ class GuardService : LifecycleService(), SensorEventListener {
         val values = if (filter != null) filter.update(event.values) else event.values
 
         // On the lock screen the user is not using the phone: never trigger the camera there.
-        val pose = SensorInput.toPose(values, deviceLocked = keyguardManager.isKeyguardLocked)
-        perform(engine.onPose(pose, SystemClock.elapsedRealtime()))
+        val orientation = SensorInput.toOrientation(
+            values,
+            deviceLocked = keyguardManager.isKeyguardLocked,
+            lyingElevationDeg = config.lyingElevationDeg,
+        )
+        perform(engine.onPose(orientation, SystemClock.elapsedRealtime()))
         publish()
     }
 
@@ -204,6 +221,9 @@ class GuardService : LifecycleService(), SensorEventListener {
             atMillis = System.currentTimeMillis(),
             faceWidthRatio = face?.faceWidthRatio,
             rollDeg = face?.rollDeg,
+            headTiltDeg = face?.let {
+                LyingJudge.headTiltDeg(engine.lastOrientation.inPlaneRotationDeg, it.rollDeg)
+            },
             lying = engine.phase == Phase.ALARMING,
         )
         GuardStatusStore.update { it.copy(lastCheck = lastCheck) }
@@ -215,6 +235,7 @@ class GuardService : LifecycleService(), SensorEventListener {
             it.copy(
                 phase = engine.phase,
                 pose = engine.lastPose,
+                screenElevationDeg = engine.lastOrientation.screenElevationDeg,
                 screenOn = screenOn ?: it.screenOn,
             )
         }
@@ -278,14 +299,19 @@ class GuardService : LifecycleService(), SensorEventListener {
         private const val NOTIFICATION_ID = 1
         private const val ACTION_STOP = "io.github.wisnujayaa.rebahanguard.STOP"
         private const val EXTRA_DELAY_SEC = "delay_sec"
+        private const val EXTRA_LYING_ELEVATION = "lying_elevation_deg"
+        private const val EXTRA_STRICT = "strict_mode"
+        private const val EXTRA_ALARM_URI = "alarm_uri"
         const val DEFAULT_DELAY_SEC = 20
 
         /** Must be called while the app is visible (Android's while-in-use camera rule). */
-        fun start(context: Context, delaySec: Int) {
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, GuardService::class.java).putExtra(EXTRA_DELAY_SEC, delaySec),
-            )
+        fun start(context: Context, settings: GuardSettings) {
+            val intent = Intent(context, GuardService::class.java)
+                .putExtra(EXTRA_DELAY_SEC, settings.delaySec)
+                .putExtra(EXTRA_LYING_ELEVATION, settings.lyingElevationDeg)
+                .putExtra(EXTRA_STRICT, settings.strictMode)
+                .putExtra(EXTRA_ALARM_URI, settings.alarmSoundUri)
+            ContextCompat.startForegroundService(context, intent)
         }
 
         fun stop(context: Context) {

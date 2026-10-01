@@ -3,11 +3,17 @@ package io.github.wisnujayaa.rebahanguard.core
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.random.Random
+import kotlin.math.asin
 import kotlin.math.sqrt
+import kotlin.random.Random
 
 class PoseClassifierTest {
-    private fun classify(x: Float, y: Float, z: Float) = PoseClassifier.classify(x, y, z)
+    private fun classify(
+        x: Float,
+        y: Float,
+        z: Float,
+        lyingElevationDeg: Float = PoseClassifier.DEFAULT_LYING_ELEVATION_DEG,
+    ) = PoseClassifier.classify(x, y, z, lyingElevationDeg)
 
     // ------------------------------------------------------------ normal cases
 
@@ -19,6 +25,51 @@ class PoseClassifierTest {
 
     @Test
     fun heldOverheadWhileOnBack_isFaceDown() = assertEquals(Pose.FACE_DOWN, classify(0f, 4f, -8.5f))
+
+    @Test
+    fun proppedOnPillow_phoneAlmostUpright_tiltedTowardFace_isFaceDown() {
+        // Reported bug: lying with the phone "tegak / agak tegak" was missed. Screen 15° below
+        // the horizon = the user is looking slightly UP at the phone.
+        val down15 = Math.toRadians(15.0)
+        assertEquals(
+            Pose.FACE_DOWN,
+            classify(0f, (9.81 * Math.cos(down15)).toFloat(), (-9.81 * Math.sin(down15)).toFloat()),
+        )
+    }
+
+    @Test
+    fun sittingAndLookingDownAtThePhone_isNotSuspicious() {
+        // Screen tilted 40° toward the ceiling: the usual way people hold a phone when sitting.
+        val up40 = Math.toRadians(40.0)
+        val pose = classify(0f, (9.81 * Math.cos(up40)).toFloat(), (9.81 * Math.sin(up40)).toFloat())
+        assertEquals(Pose.UPRIGHT, pose)
+    }
+
+    @Test
+    fun thresholdIsConfigurable() {
+        val down10 = Math.toRadians(10.0)
+        val y = (9.81 * Math.cos(down10)).toFloat()
+        val z = (-9.81 * Math.sin(down10)).toFloat()
+        assertEquals(Pose.FACE_DOWN, classify(0f, y, z, lyingElevationDeg = -5f))
+        assertEquals(Pose.UPRIGHT, classify(0f, y, z, lyingElevationDeg = -30f))
+    }
+
+    @Test
+    fun measuredAngles_matchKnownOrientations() {
+        val upright = PoseClassifier.measure(0f, 9.81f, 0f)
+        assertEquals(0f, upright.screenElevationDeg, 0.01f)
+        assertEquals(0f, upright.inPlaneRotationDeg, 0.01f)
+
+        val sideways = PoseClassifier.measure(9.81f, 0f, 0f)
+        assertEquals(90f, sideways.inPlaneRotationDeg, 0.01f)
+
+        val upsideDown = PoseClassifier.measure(0f, -9.81f, 0f)
+        assertEquals(180f, kotlin.math.abs(upsideDown.inPlaneRotationDeg), 0.01f)
+
+        val flat = PoseClassifier.measure(0f, 0f, 9.81f)
+        assertEquals(90f, flat.screenElevationDeg, 0.01f)
+        assertTrue(flat.inPlaneRotationDeg.isNaN()) // "upright" is meaningless when flat
+    }
 
     @Test
     fun onItsSide_isSideways() {
@@ -79,8 +130,15 @@ class PoseClassifierTest {
             if (m < 1f || m > 50f) {
                 assertEquals(Pose.UNKNOWN, pose)
             } else {
-                // The one rule that must always hold: face-down iff the screen points down > 30°.
-                assertEquals("($x,$y,$z)", z / m < -0.5f, pose == Pose.FACE_DOWN)
+                // The one rule that must always hold: face-down iff the screen points below the
+                // threshold angle.
+                // Same float arithmetic as the production code, so boundary samples agree exactly.
+                val elevation = asin((z / m).coerceIn(-1f, 1f)) * (180.0 / Math.PI).toFloat()
+                assertEquals(
+                    "($x,$y,$z)",
+                    elevation < PoseClassifier.DEFAULT_LYING_ELEVATION_DEG,
+                    pose == Pose.FACE_DOWN,
+                )
             }
         }
     }

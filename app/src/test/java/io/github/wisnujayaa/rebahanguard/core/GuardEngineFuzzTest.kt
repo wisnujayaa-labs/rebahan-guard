@@ -24,6 +24,7 @@ class GuardEngineFuzzTest {
         checkTimeoutMs = 10_000,
         maxAlarmMs = 30_000,
     )
+    private val strictConfig = config.copy(strictMode = true)
 
     private class Stats {
         var checks = 0
@@ -42,7 +43,7 @@ class GuardEngineFuzzTest {
     ) {
         val engine = GuardEngine(config)
         var now = 1_000_000L
-        var pose = Pose.UPRIGHT
+        var orientation = Orientation.of(Pose.UPRIGHT)
         var cameraOn = false
         var cameraSince = 0L
         var alarmOn = false
@@ -80,11 +81,15 @@ class GuardEngineFuzzTest {
         private fun poseEvent(gap: Long) {
             advanceClock(gap)
             // Poses are "sticky" like real life, so long suspicious stretches actually happen.
-            if (rnd.nextInt(10) == 0) pose = Pose.entries[rnd.nextInt(Pose.entries.size)]
+            if (rnd.nextInt(10) == 0) {
+                val pose = Pose.entries[rnd.nextInt(Pose.entries.size)]
+                val inPlane = if (rnd.nextInt(5) == 0) Float.NaN else rnd.nextFloat() * 360f - 180f
+                orientation = Orientation(pose, rnd.nextFloat() * 180f - 90f, inPlane)
+            }
 
             val wasAlarming = engine.phase == Phase.ALARMING
             val wasChecking = engine.phase == Phase.CHECKING
-            val action = engine.onPose(pose, now)
+            val action = engine.onPose(orientation, now)
             apply(action, fromFaceResult = false, face = null)
 
             if (wasChecking && action == Action.CANCEL_CAMERA_CHECK) stats.watchdogTimeouts++
@@ -175,10 +180,15 @@ class GuardEngineFuzzTest {
         }
     }
 
-    private fun fuzz(seeds: IntRange, steps: Int, clockCanGoBackwards: Boolean): Stats {
+    private fun fuzz(
+        seeds: IntRange,
+        steps: Int,
+        clockCanGoBackwards: Boolean,
+        cfg: GuardConfig = config,
+    ): Stats {
         val stats = Stats()
         for (seed in seeds) {
-            FakePhone(config, Random(seed), seed, clockCanGoBackwards, stats).run(steps)
+            FakePhone(cfg, Random(seed), seed, clockCanGoBackwards, stats).run(steps)
         }
         return stats
     }
@@ -193,6 +203,13 @@ class GuardEngineFuzzTest {
         assertTrue("watchdog=${stats.watchdogTimeouts}", stats.watchdogTimeouts > 10)
         assertTrue("alarmCaps=${stats.alarmCaps}", stats.alarmCaps > 10)
         assertTrue("spurious=${stats.spuriousResults}", stats.spuriousResults > 1_000)
+    }
+
+    @Test
+    fun invariantsHold_inStrictMode() {
+        val stats = fuzz(seeds = 2_000..2_300, steps = 2_000, clockCanGoBackwards = false, cfg = strictConfig)
+        assertTrue("checks=${stats.checks}", stats.checks > 1_000)
+        assertTrue("alarms=${stats.alarms}", stats.alarms > 100)
     }
 
     @Test

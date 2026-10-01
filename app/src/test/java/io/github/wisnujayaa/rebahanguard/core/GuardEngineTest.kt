@@ -68,9 +68,14 @@ class GuardConfigTest {
             { GuardConfig(minFaceWidthRatio = 0f) },
             { GuardConfig(minFaceWidthRatio = 1.5f) },
             { GuardConfig(minFaceWidthRatio = Float.NaN) },
-            { GuardConfig(maxSidewaysRollDeg = -1f) },
-            { GuardConfig(maxSidewaysRollDeg = 90f) },
-            { GuardConfig(maxSidewaysRollDeg = Float.NaN) },
+            { GuardConfig(minHeadTiltDeg = 0f) },
+            { GuardConfig(minHeadTiltDeg = 91f) },
+            { GuardConfig(minHeadTiltDeg = Float.NaN) },
+            { GuardConfig(lyingElevationDeg = Float.NaN) },
+            { GuardConfig(lyingElevationDeg = -61f) },
+            { GuardConfig(lyingElevationDeg = 31f) },
+            { GuardConfig(strictAlarmBurstMs = 0) },
+            { GuardConfig(maxAlarmMs = 10_000, strictAlarmBurstMs = 20_000) },
         )
         for (make in bad) {
             assertThrows(IllegalArgumentException::class.java) { make() }
@@ -265,5 +270,71 @@ class GuardEngineTest {
         e2.onFaceResult(null, t + 10_000)
         assertEquals(Action.NONE, e2.onPose(Pose.FACE_DOWN, t + 15_000))
         assertEquals(Phase.COOLDOWN, e2.phase)
+    }
+
+    // ------------------------------------------------------------ strict mode
+
+    private val strict = config.copy(strictMode = true, strictAlarmBurstMs = 5_000)
+
+    @Test
+    fun normalMode_uprightPhone_neverChecks() {
+        val e = GuardEngine(config)
+        var t = 0L
+        repeat(1_000) {
+            assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, t))
+            t += 1_000
+        }
+    }
+
+    @Test
+    fun strictMode_lyingOnSideWithUprightPhone_ringsInBurstsUntilHeadIsUpright() {
+        val e = GuardEngine(strict)
+        val sidewaysHead = FaceObservation(0.4f, 88f) // phone upright, face rotated → head sideways
+        val uprightHead = FaceObservation(0.4f, 3f)
+
+        e.triggerCheck(Pose.UPRIGHT, 0)
+        assertEquals(Action.START_ALARM, e.onFaceResult(sidewaysHead, 10_300))
+
+        // Gravity can't see the user sit up (phone stays upright), so: burst, then re-check.
+        assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, 15_299))
+        assertEquals(Action.STOP_ALARM, e.onPose(Pose.UPRIGHT, 15_300))
+        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 15_500)) // no 10 s delay
+        assertEquals(Action.START_ALARM, e.onFaceResult(sidewaysHead, 16_000)) // still lying
+
+        assertEquals(Action.STOP_ALARM, e.onPose(Pose.UPRIGHT, 21_000))
+        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 21_200))
+        assertEquals(Action.NONE, e.onFaceResult(uprightHead, 21_700)) // sat up
+        assertEquals(Phase.COOLDOWN, e.phase)
+    }
+
+    @Test
+    fun strictMode_baseAlarm_stopsAsSoonAsUserSitsUp() {
+        // Alarm caught with the screen facing down; sitting up makes the phone UPRIGHT, which is
+        // "suspicious" in strict mode — but it must still count as having sat up.
+        val e = GuardEngine(strict)
+        e.triggerCheck(Pose.FACE_DOWN, 0)
+        e.onFaceResult(lyingFace, 10_100)
+        assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, 11_000))
+        assertEquals(Action.STOP_ALARM, e.onPose(Pose.UPRIGHT, 12_500))
+    }
+
+    @Test
+    fun strictMode_recheckIsSkippedIfUserAlreadyPutThePhoneDownFlat() {
+        val e = GuardEngine(strict)
+        e.triggerCheck(Pose.UPRIGHT, 0)
+        e.onFaceResult(FaceObservation(0.4f, 88f), 10_300)
+        e.onPose(Pose.UPRIGHT, 15_300) // burst over
+        assertEquals(Action.NONE, e.onPose(Pose.FACE_UP, 15_500))
+        assertEquals(Phase.WATCHING, e.phase)
+    }
+
+    @Test
+    fun strictMode_screenOffDuringBurst_cancelsTheImmediateRecheck() {
+        val e = GuardEngine(strict)
+        e.triggerCheck(Pose.UPRIGHT, 0)
+        e.onFaceResult(FaceObservation(0.4f, 88f), 10_300)
+        e.onPose(Pose.UPRIGHT, 15_300)
+        e.onScreenOff()
+        assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, 15_500)) // normal delay applies again
     }
 }

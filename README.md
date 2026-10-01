@@ -32,27 +32,36 @@ flowchart TD
 
 This **cascade** (cheap detector first, expensive one only on suspicion) is the same idea behind "Hey Google" wake-word chips.
 
-### Step 1 — Phone orientation from gravity
+### Step 1 — Are you looking down at the phone, or up at it?
 
-The accelerometer always feels gravity. Normalising the vector `(x, y, z)` tells us which phone axis points at the floor:
+The accelerometer always feels gravity, so the app knows the **screen elevation**: the angle the screen faces, from +90° (ceiling) to −90° (floor).
 
-| What you're doing | Phone pose | Gravity share |
+The key observation came from real-world testing: **sitting, you look *down* at your phone, so the screen faces up. Lying in bed (flat *or* propped up on a pillow, phone held upright), you look straight at it or *up* at it, so the screen faces sideways or down.**
+
+| What you're doing | Screen elevation | Pose |
 |---|---|---|
-| Sitting, normal use | `UPRIGHT` | mostly **y** |
-| On your back, phone overhead | `FACE_DOWN` | **z < −0.5** (screen faces the floor) |
-| On your side | `SIDEWAYS` | mostly **x** |
+| Sitting, normal use | about +20° … +60° | `UPRIGHT` / `TILTED` |
+| Propped on a pillow, phone upright | about −5° … −30° | `FACE_DOWN` (suspicious) |
+| Flat on your back, phone overhead | about −60° … −90° | `FACE_DOWN` (suspicious) |
+| On your side | phone's long edge points down | `SIDEWAYS` (suspicious) |
+
+The threshold (default −5°) can be **calibrated**: the app records 5 s of sitting and 5 s of lying and picks the angle that best separates the two. This is a tiny one-feature classifier, made robust to stray samples by using percentiles instead of min/max.
 
 ### Step 2 — Head orientation = phone orientation + face roll
 
-`SIDEWAYS` alone is ambiguous: watching a landscape video while sitting also turns the phone sideways. ML Kit reports the face's **roll** inside the camera frame, and combining both gives the orientation of the *head*:
+Gravity alone can't separate every case (e.g. lying on your side with the phone upright, or sitting while watching a landscape video). The camera reports the face's **roll** inside the image, and combining it with the phone's rotation gives the tilt of the *head* relative to Earth:
 
-| Phone (gravity) | Face in image | Conclusion |
-|---|---|---|
-| Sideways | upright (roll ≈ 0°) | head is sideways too → **lying on side** 🔔 |
-| Sideways | rotated (roll ≈ ±90°) | head is upright → sitting, watching video ✅ |
-| Face down | any large face | user is under the phone → **lying on back** 🔔 |
+| Phone (gravity) | Face in image | Head | Verdict |
+|---|---|---|---|
+| Sideways | upright | sideways | **lying on side** 🔔 |
+| Sideways | rotated 90° | upright | sitting, landscape video ✅ |
+| Upright *(strict mode)* | rotated 90° | sideways | **lying on side** 🔔 |
+| Upright | upright | upright | sitting ✅ |
+| Screen facing down | any large face | — | **looking up from below** 🔔 |
 
-A minimum face size (20 % of the image width) means a roommate across the room is ignored.
+The math uses only absolute angles, so it doesn't depend on sign conventions (front-camera mirroring, ML Kit's roll direction). Diagonal holds (≈45°), where the two readings become ambiguous, are deliberately left undecided (fail-safe). A minimum face size (20 % of the image width) means a roommate across the room is ignored.
+
+**Strict mode** (optional) also checks with the camera while the phone is upright. Since sitting up doesn't change an upright phone's pose, alarms in this mode ring in 5-second bursts with a camera re-check in between, and stop as soon as the head is upright again.
 
 ### Step 3 — A testable state machine
 
@@ -79,7 +88,9 @@ app/src/main/java/io/github/wisnujayaa/rebahanguard/
 │   ├── Pose.kt           #   gravity vector → Pose
 │   ├── SensorInput.kt    #   input sanitising, lock-screen rule, accelerometer filter
 │   ├── Debouncer.kt      #   "true for N ms" filter
-│   ├── LyingJudge.kt     #   sensor fusion: pose + face → lying?
+│   ├── LyingJudge.kt     #   sensor fusion: pose + face → head tilt → lying?
+│   ├── Calibrator.kt     #   learns the personal lying threshold from two recordings
+│   ├── AlarmSoundPolicy.kt # validates the chosen alarm sound URI
 │   └── GuardEngine.kt    #   state machine, emits Actions
 ├── service/              # Android glue
 │   ├── GuardService.kt   #   foreground service (type=camera), sensors, screen on/off
@@ -99,7 +110,7 @@ The engine never touches hardware: it returns an `Action` (`START_CAMERA_CHECK`,
 | Camera images leaking | Frames analysed in memory and dropped; nothing saved. The manifest **removes `INTERNET`** (which ML Kit's telemetry would add), so the app cannot send anything anywhere. |
 | Silent camera use | Camera on only ≤ 4 s per check, only after a suspicious pose, never on the lock screen; Android's green indicator always shows. |
 | Other apps controlling the service | Service and screen receiver are **not exported**; notification `PendingIntent`s are explicit and `FLAG_IMMUTABLE`. |
-| Malformed input (sensor glitches, NaN/∞, corrupted settings, intent extras) | Everything is validated or clamped at the boundary (`SensorInput`, `FaceObservation.isValid`, `GuardConfig` `require`s). Invalid data is always treated as *not lying*: fail-safe, never a false alarm. |
+| Malformed input (sensor glitches, NaN/∞, corrupted settings, intent extras, alarm sound URIs) | Everything is validated or clamped at the boundary (`SensorInput`, `FaceObservation.isValid`, `GuardConfig` `require`s). Invalid data is always treated as *not lying*: fail-safe, never a false alarm. |
 | App stuck or annoying | Watchdog ends a camera check that never answers; the alarm stops by itself after 60 s; screen-off stops everything. |
 | Crash on a background thread | Frame analysis catches every exception; alarm sound and vibration fail independently. |
 | Supply chain (CI) | Workflow token is read-only, Gradle wrapper is checksum-validated, Dependabot proposes dependency updates. |
@@ -114,11 +125,12 @@ All decision logic is pure Kotlin, so it is tested on the JVM in well under a se
 | Suite | What it covers |
 |---|---|
 | `PoseClassifierTest` | Known poses, NaN/∞/zero/huge readings, 100 000 random vectors checked against the math, scale invariance |
-| `LyingJudgeTest` | Sensor fusion rules, exact boundaries, garbage detector output, angle math on 100 000 random angles |
+| `LyingJudgeTest` | Sensor fusion rules, head-tilt math, sign-convention independence, diagonal ambiguity, garbage detector output |
+| `CalibratorTest`, `AlarmSoundPolicyTest` | Threshold learning (separable, overlapping, impossible, noisy, garbage data), URI allow-list (rejects `file://`, `http(s)://`, control chars, oversized) |
 | `SensorInputTest`, `GravityFilterTest` | Malformed events, lock screen, setting clamping, filter priming, glitch recovery |
 | `DebouncerTest`, `GuardConfigTest` | Timing, clock going backwards, invalid configuration |
-| `GuardEngineTest` | Full cycles plus unexpected situations: camera never answers, late/duplicate results, alarm limit, flickering pose, timestamp overflow |
-| `GuardEngineFuzzTest` | ~1.2 million random events against a fake phone that tracks the real camera/alarm state, asserting safety invariants after every event (camera never started twice, alarm only after a positive check, every alarm stopped exactly once, nothing stuck), including a run where the clock jumps backwards |
+| `GuardEngineTest` | Full cycles plus unexpected situations: camera never answers, late/duplicate results, alarm limit, flickering pose, timestamp overflow, strict-mode bursts and re-checks |
+| `GuardEngineFuzzTest` | ~1.2 million random events against a fake phone that tracks the real camera/alarm state, asserting safety invariants after every event (camera never started twice, alarm only after a positive check, every alarm stopped exactly once, nothing stuck), including strict mode and a run where the clock jumps backwards |
 
 **Mutation testing** was used to check that the tests themselves are strong: ten realistic bugs (no watchdog, no alarm limit, trusting NaN faces, lock-screen triggering, cooldown overflow, …) were re-inserted one at a time, and the suite caught **9/10**. The survivor turned out to be an *equivalent mutant*: a redundant NaN check whose removal doesn't change behaviour, because a second check also catches it.
 
@@ -139,6 +151,7 @@ All decision logic is pure Kotlin, so it is tested on the JVM in well under a se
 - [ ] Instrumented (on-device) tests for the service and camera layer
 - [ ] Some OEM battery savers (Xiaomi, Oppo, vivo) may kill the service — whitelist the app
 - [ ] Schedule (only active at night), statistics of "caught" events
+- [ ] Learn the threshold from more than one feature (e.g. add head pitch) — a small logistic regression
 
 ## Build & install
 
