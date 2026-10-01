@@ -36,6 +36,10 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Files uploaded through the GitHub website lose their "executable" flag.
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
       - name: Unit tests (incl. fuzz tests)
         run: ./gradlew testDebugUnitTest
 
