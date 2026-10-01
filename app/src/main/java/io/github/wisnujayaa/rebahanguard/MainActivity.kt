@@ -40,6 +40,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -94,7 +95,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             RebahanGuardTheme {
-                GuardScreen()
+                // Surface sets LocalContentColor: every Text without an explicit color inherits
+                // the light night-text color instead of Compose's default black.
+                Surface(modifier = Modifier.fillMaxSize(), color = Night.Ink, contentColor = Night.Text) {
+                    GuardScreen()
+                }
             }
         }
     }
