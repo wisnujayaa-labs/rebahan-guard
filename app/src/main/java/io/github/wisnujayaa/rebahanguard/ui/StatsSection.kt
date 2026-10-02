@@ -2,6 +2,15 @@ package io.github.wisnujayaa.rebahanguard.ui
 
 import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +37,43 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
+/**
+ * The "Impian" tab. In this version it holds the record of the guard — streak, the week, the
+ * camera history — and a promise of where dreams will live (v1.6).
+ */
+@Composable
+fun DreamsTab(refreshKey: Any?, checks: List<LastCheck>) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        Text("Impian", style = MaterialTheme.typography.headlineLarge)
+        Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
+            AccentRule(Tone.Lamp, Modifier.fillMaxHeight())
+            Column(Modifier.padding(start = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "Tulis apa yang ingin kamu capai, dan kenapa itu penting bagimu.",
+                    style = MaterialTheme.typography.titleLarge.copy(fontStyle = FontStyle.Italic),
+                )
+                Text(
+                    "Segera hadir: impian, target, dan kebiasaan, dengan kalimat komitmen yang kamu " +
+                        "tulis sendiri (atau pilih dari contoh) dan yang akan muncul di layar kunci.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Tone.Muted,
+                )
+            }
+        }
+        HorizontalDivider(color = Tone.Hairline)
+        Kicker("Jejakmu")
+        StatsSection(refreshKey)
+        CheckHistory(checks)
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
 /** Streak, this week's numbers, and a report the user can send to their partner. */
 @Composable
 fun StatsSection(refreshKey: Any?) {
@@ -38,26 +84,25 @@ fun StatsSection(refreshKey: Any?) {
     val week = records.filter { it.night in (tonight - 6)..tonight && it.guarded }
 
     Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(Night.Dusk.copy(alpha = 0.7f))
-            .padding(20.dp),
+        Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("$streak", style = MaterialTheme.typography.displaySmall, color = Night.Lamp)
+            Text("$streak", style = MaterialTheme.typography.displayMedium.copy(fontFamily = Fraunces))
             Text(
-                if (streak == 1) "malam bersih berturut-turut" else "malam bersih berturut-turut",
+                "hari bersih berturut-turut",
                 style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(bottom = 8.dp),
+                color = Tone.Muted,
+                modifier = Modifier.padding(bottom = 10.dp),
             )
         }
+        val tampers = week.sumOf { it.tampers }
         Text(
-            "7 malam terakhir: ${week.size} malam dijaga, ketahuan ${week.sumOf { it.caught }} kali, " +
-                "terkunci ${week.sumOf { it.lockedMs } / 60_000} menit.",
+            "7 hari terakhir: ${week.size} hari dijaga, ketahuan rebahan ${week.sumOf { it.caught }} kali, " +
+                "terkunci ${week.sumOf { it.lockedMs } / 60_000} menit." +
+                if (tampers > 0) " Mencoba mengecilkan volume: $tampers kali." else "",
             style = MaterialTheme.typography.bodySmall,
-            color = Night.Muted,
+            color = Tone.Muted,
         )
         TextButton(onClick = {
             val text = NightStats.summary(records, tonight, PartnerStore.name(context))
@@ -91,7 +136,7 @@ fun CheckHistory(checks: List<LastCheck>) {
             Text(
                 "${format.format(Date(c.atMillis))}  ${parts.joinToString(", ")} → $verdict",
                 style = MaterialTheme.typography.bodySmall,
-                color = Night.Muted,
+                color = Tone.Muted,
             )
         }
     }

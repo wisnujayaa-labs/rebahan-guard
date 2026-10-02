@@ -50,6 +50,7 @@ fun ScreenAngleDial(
     alarming: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val p = Tone.current // captured here: the Canvas lambda below is not composable
     val hasReading = elevationDeg.isFinite()
     val target = if (hasReading) elevationDeg.coerceIn(-90f, 90f) else 0f
     val angle by animateFloatAsState(target, animationSpec = tween(150), label = "screenAngle")
@@ -69,7 +70,7 @@ fun ScreenAngleDial(
     }
 
     val textMeasurer = rememberTextMeasurer()
-    val labelStyle = TextStyle(color = Night.Muted, fontSize = 12.sp)
+    val labelStyle = TextStyle(color = p.Muted, fontSize = 12.sp)
     val description = if (hasReading) {
         "Layar menghadap ${angle.roundToInt()} derajat, ${if (inBed) "zona rebahan" else "zona aman"}"
     } else {
@@ -90,9 +91,9 @@ fun ScreenAngleDial(
             val boxTopLeft = Offset(c.x - r, c.y - r)
 
             // Compose measures arc angles clockwise from 3 o'clock, so elevation e ↦ angle -e.
-            drawArc(Night.DuskHigh, -90f, 90f - thr, useCenter = true, topLeft = boxTopLeft, size = box)
+            drawArc(p.DuskHigh, -90f, 90f - thr, useCenter = true, topLeft = boxTopLeft, size = box)
             drawArc(
-                Night.Blanket.copy(alpha = blanketAlpha), -thr, 90f + thr,
+                p.Blanket.copy(alpha = blanketAlpha), -thr, 90f + thr,
                 useCenter = true, topLeft = boxTopLeft, size = box,
             )
 
@@ -100,7 +101,7 @@ fun ScreenAngleDial(
             for (e in -90..90 step 30) {
                 val dir = direction(e.toFloat())
                 drawLine(
-                    Night.Text.copy(alpha = 0.35f),
+                    p.Text.copy(alpha = 0.35f),
                     c + dir * (r - 8.dp.toPx()), c + dir * r,
                     strokeWidth = 1.dp.toPx(),
                 )
@@ -109,7 +110,7 @@ fun ScreenAngleDial(
             // The user's threshold, like a dashed line drawn on the wall.
             val thrDir = direction(thr)
             drawLine(
-                Night.Lamp, c, c + thrDir * r,
+                p.Lamp, c, c + thrDir * r,
                 strokeWidth = 1.5.dp.toPx(),
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 5.dp.toPx())),
             )
@@ -119,14 +120,14 @@ fun ScreenAngleDial(
             labelAt(
                 textMeasurer, "batas",
                 c + thrDir * (r + 4.dp.toPx()) + Offset(0f, -8.dp.toPx()),
-                labelStyle.copy(color = Night.Lamp),
+                labelStyle.copy(color = p.Lamp),
             )
 
             if (hasReading) {
                 // Where the screen is looking.
                 val gaze = direction(angle)
                 drawLine(
-                    if (inBed) Night.Text else Night.Mint,
+                    if (inBed) p.Text else p.Mint,
                     c + gaze * 14.dp.toPx(), c + gaze * (r - 12.dp.toPx()),
                     strokeWidth = 3.dp.toPx(),
                     cap = StrokeCap.Round,
@@ -136,13 +137,13 @@ fun ScreenAngleDial(
             // The phone, side view: body plus a lit strip on the screen side.
             rotate(degrees = -angle, pivot = c) {
                 drawRoundRect(
-                    Night.Text.copy(alpha = 0.92f),
+                    p.Text.copy(alpha = 0.92f),
                     topLeft = Offset(c.x - 6.dp.toPx(), c.y - 34.dp.toPx()),
                     size = Size(12.dp.toPx(), 68.dp.toPx()),
                     cornerRadius = CornerRadius(5.dp.toPx()),
                 )
                 drawRect(
-                    Night.Lamp,
+                    p.Lamp,
                     topLeft = Offset(c.x + 4.dp.toPx(), c.y - 29.dp.toPx()),
                     size = Size(2.5.dp.toPx(), 58.dp.toPx()),
                 )
@@ -159,7 +160,7 @@ fun ScreenAngleDial(
             Text(
                 if (hasReading) "${angle.roundToInt()}°" else "—",
                 style = MaterialTheme.typography.displaySmall,
-                color = Night.Text,
+                color = p.Text,
             )
             Text(
                 when {
@@ -168,7 +169,7 @@ fun ScreenAngleDial(
                     else -> "zona aman"
                 },
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (inBed) Night.Blanket else Night.Mint,
+                color = if (inBed) p.Blanket else p.Mint,
             )
         }
     }

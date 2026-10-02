@@ -1,7 +1,5 @@
 package io.github.wisnujayaa.rebahanguard.core
 
-import java.text.Normalizer
-
 /**
  * A promise the user makes to themselves: "keep the guard on until …".
  *
@@ -66,28 +64,18 @@ object EmergencyStop {
             "Waktu yang saya buang malam ini tidak akan pernah kembali, " +
             "dan saya sendiri yang akan menanggung akibatnya besok."
 
+    private val phrase = TypedPhrase(PHRASE)
+
     fun canStop(waitedMs: Long, typed: String, hasPartner: Boolean): Boolean =
         waitedMs >= EmergencyStopRules.waitMs(hasPartner) && phraseMatches(typed)
 
     /** Case, accents, spacing and punctuation don't matter; every word does, in order. */
-    fun phraseMatches(typed: String): Boolean = normalize(typed) == normalize(PHRASE)
+    fun phraseMatches(typed: String): Boolean = phrase.matches(typed)
 
     /** How many leading words are already right — lets the UI show progress while typing. */
-    fun correctWords(typed: String): Int {
-        val target = normalize(PHRASE).split(" ")
-        val got = normalize(typed).split(" ").filter { it.isNotEmpty() }
-        return target.zip(got).takeWhile { (a, b) -> a == b }.count()
-    }
+    fun correctWords(typed: String): Int = phrase.correctWords(typed)
 
-    val wordCount: Int get() = normalize(PHRASE).split(" ").size
-
-    private fun normalize(s: String): String =
-        Normalizer.normalize(s, Normalizer.Form.NFKD)
-            .replace(Regex("\\p{M}+"), "")
-            .lowercase()
-            .replace(Regex("[^a-z0-9 ]"), " ")
-            .trim()
-            .replace(Regex("\\s+"), " ")
+    val wordCount: Int get() = phrase.wordCount
 }
 
 /** Short reminders shown on the lock screen, rotated so they don't become wallpaper. */

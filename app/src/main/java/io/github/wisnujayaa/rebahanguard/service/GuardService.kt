@@ -43,6 +43,11 @@ import io.github.wisnujayaa.rebahanguard.core.Orientation
 import io.github.wisnujayaa.rebahanguard.core.Pose
 import io.github.wisnujayaa.rebahanguard.core.PoseClassifier
 import io.github.wisnujayaa.rebahanguard.core.SensorInput
+import io.github.wisnujayaa.rebahanguard.core.DeskRest
+import io.github.wisnujayaa.rebahanguard.core.Plan
+import io.github.wisnujayaa.rebahanguard.core.StillnessMeter
+import io.github.wisnujayaa.rebahanguard.core.TamperPenalty
+import io.github.wisnujayaa.rebahanguard.core.TypedPhrase
 
 /**
  * Foreground service (type = camera) that glues the hardware to [GuardEngine]:
@@ -65,7 +70,53 @@ class GuardService : LifecycleService(), SensorEventListener {
     private lateinit var audioManager: AudioManager
     private lateinit var overlay: LockOverlay
     private val handler = Handler(Looper.getMainLooper())
-    private val stopSound = Runnable { alarm.stop() }
+    /** Locked: the sound stops after a while, the (escalating) vibration doesn't. */
+    private val stopSound = Runnable { if (overlay.isShowing) alarm.silence() else alarm.stop() }
+
+    /**
+     * Penalty for turning the alarm volume down. Counted down only while the screen is on, the
+     * lock is shown and the user is NOT lying — lying time and screen-off time don't count.
+     */
+    private var penaltyLeftMs = 0L
+    private var penaltyNeedsPhrase = false
+    private var lastTamperMs = 0L
+    private var lastPenaltyTickMs = 0L
+    private val penaltyTick = object : Runnable {
+        override fun run() {
+            if (!started || penaltyLeftMs <= 0) return
+            val now = SystemClock.elapsedRealtime()
+            val dt = (now - lastPenaltyTickMs).coerceIn(0, 2_000)
+            lastPenaltyTickMs = now
+            val interactive = powerManager.isInteractive && !keyguardManager.isKeyguardLocked
+            if (interactive && overlay.isShowing && engine.phase != Phase.ALARMING && !overlay.isAskingPhrase) {
+                penaltyLeftMs = (penaltyLeftMs - dt).coerceAtLeast(0)
+                if (penaltyLeftMs > 0) {
+                    overlay.showPenalty((penaltyLeftMs + 999) / 1000, penaltyNeedsPhrase)
+                } else if (penaltyNeedsPhrase) {
+                    penaltyLeftMs = 1 // keep the lock until the sentence is typed
+                    overlay.askPhrase(TypedPhrase(TamperPenalty.PHRASE)) { releasePenalty() }
+                } else {
+                    releasePenalty()
+                    return
+                }
+            }
+            handler.postDelayed(this, 1_000)
+        }
+    }
+
+    /** While the alarm is active the alarm stream is held at full volume. */
+    private val volumeWatch = object : Runnable {
+        override fun run() {
+            if (!started) return
+            val active = alarm.isPlaying || warningUntilMs > 0
+            if (!active) return
+            if (TamperPenalty.isAttempt(alarm.currentVolume(), alarm.enforcedVolume)) {
+                alarm.enforceVolume()
+                onTamper()
+            }
+            handler.postDelayed(this, VOLUME_CHECK_MS)
+        }
+    }
 
     private var lockEnabled = true
 
@@ -100,7 +151,12 @@ class GuardService : LifecycleService(), SensorEventListener {
     private var lastGuardedNight = Int.MIN_VALUE
     private var messageIndex = 0L
 
+    private lateinit var powerManager: PowerManager
     private var gravitySensor: Sensor? = null
+    private var proximitySensor: Sensor? = null
+    private var rawAccelSensor: Sensor? = null
+    private var proximityNear: Boolean? = null
+    private val stillness = StillnessMeter()
     private var accelerometerFilter: GravityFilter? = null
     private var sensorsRegistered = false
     private var started = false
@@ -168,7 +224,8 @@ class GuardService : LifecycleService(), SensorEventListener {
         lockEnabled = intent?.getBooleanExtra(EXTRA_LOCK, true) ?: true
         schedule = GuardSettings.load(this).schedule
         engine = GuardEngine(config)
-        overlay = LockOverlay(this, onEmergency = ::onEmergency)
+        overlay = LockOverlay(this, onEmergency = ::onEmergency, onVolumeKey = { onTamper() })
+        powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         CommitmentStore.onGuardStart(this)
         BootReceiver.dismiss(this)
@@ -186,6 +243,9 @@ class GuardService : LifecycleService(), SensorEventListener {
         if (gravitySensor == null) {
             Log.e(TAG, "No gravity or accelerometer sensor on this device")
         }
+        // Telling "face down on a desk" from "held above the face" (see DeskRest).
+        proximitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY)
+        rawAccelSensor = if (accelerometerFilter == null) sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) else null
 
         ContextCompat.registerReceiver(
             this,
@@ -199,7 +259,7 @@ class GuardService : LifecycleService(), SensorEventListener {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
 
-        val screenOn = (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+        val screenOn = powerManager.isInteractive
         if (screenOn) registerSensors()
         GuardStatusStore.update { it.copy(running = true, screenOn = screenOn, phase = Phase.WATCHING) }
 
@@ -234,6 +294,8 @@ class GuardService : LifecycleService(), SensorEventListener {
         if (sensorsRegistered) return
         val sensor = gravitySensor ?: return
         sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        proximitySensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
+        rawAccelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
         sensorsRegistered = true
     }
 
@@ -241,14 +303,25 @@ class GuardService : LifecycleService(), SensorEventListener {
         if (!sensorsRegistered) return
         sensorManager.unregisterListener(this)
         sensorsRegistered = false
+        stillness.reset()
+        proximityNear = null
     }
 
     override fun onSensorChanged(event: SensorEvent) {
         if (!started) return
+        val now = SystemClock.elapsedRealtime()
+        when (event.sensor.type) {
+            Sensor.TYPE_PROXIMITY -> {
+                proximityNear = DeskRest.isNear(event.values.getOrElse(0) { Float.NaN }, event.sensor.maximumRange)
+                return
+            }
+            Sensor.TYPE_ACCELEROMETER -> {
+                if (event.values.size >= 3) stillness.add(event.values[0], event.values[1], event.values[2], now)
+                if (accelerometerFilter == null) return // only a stillness input; gravity comes from TYPE_GRAVITY
+            }
+        }
         val filter = accelerometerFilter
         val values = if (filter != null) filter.update(event.values) else event.values
-
-        val now = SystemClock.elapsedRealtime()
 
         // Phone calls (including WhatsApp/VoIP), the emergency pause and hours outside the
         // schedule always win.
@@ -256,18 +329,21 @@ class GuardService : LifecycleService(), SensorEventListener {
         if (isInCall() || now < emergencyUntilMs || outside) {
             releaseStickyLock()
             perform(engine.onScreenOff())
+            if (penaltyLeftMs > 0) overlay.hide() // paused, not forgiven
             publish(outsideSchedule = outside)
             return
         }
         markGuardedTonight()
+        resumePenaltyIfNeeded()
 
         // On the lock screen the user is not using the phone: never trigger the camera there.
         val keyguardLocked = keyguardManager.isKeyguardLocked
-        val orientation = SensorInput.toOrientation(
+        val measured = SensorInput.toOrientation(
             values,
             deviceLocked = keyguardLocked,
             lyingElevationDeg = config.lyingElevationDeg,
         )
+        val orientation = DeskRest.resolve(measured, proximityNear, stillness.isStill(now))
         perform(engine.onPose(orientation, now))
         if (stickyLock && !keyguardLocked) updateStickyLock(orientation, now)
         if (overlay.isShowing) overlay.update(orientation.screenElevationDeg, config.lyingElevationDeg)
@@ -286,7 +362,61 @@ class GuardService : LifecycleService(), SensorEventListener {
     private fun releaseStickyLock() {
         if (!stickyLock) return
         stickyLock = false
-        if (engine.phase != Phase.ALARMING) overlay.hide()
+        if (engine.phase != Phase.ALARMING && penaltyLeftMs <= 0) overlay.hide()
+    }
+
+    // ---------------------------------------------------------------- tamper penalty
+
+    /** The alarm volume went down (slider or key) while the alarm was active. */
+    private fun onTamper() {
+        if (!started) return
+        if (!alarm.isPlaying && warningUntilMs <= 0) return // nothing to silence: not an attempt
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastTamperMs < TAMPER_DEBOUNCE_MS) return // one press-and-hold = one attempt
+        lastTamperMs = now
+
+        StatsStore.update(this) { it.copy(tampers = it.tampers + 1) }
+        val attempts = StatsStore.tampersTonight(this).coerceAtLeast(1)
+        val extra = TamperPenalty.extraLockMs(attempts)
+        penaltyLeftMs = (penaltyLeftMs + extra).coerceAtMost(MAX_PENALTY_MS)
+        penaltyNeedsPhrase = penaltyNeedsPhrase || TamperPenalty.requiresPhrase(attempts)
+
+        if (warningUntilMs > 0) engageLock() // no more warning for someone silencing it
+        alarm.start(vibrateAtMax = TamperPenalty.startsAtMaxVibration(attempts)) // sound comes back
+        handler.removeCallbacks(stopSound)
+        handler.postDelayed(stopSound, LOCKED_SOUND_MS)
+        overlay.showTamper(attempts, (extra / TamperPenalty.MINUTE_MS).toInt(), penaltyNeedsPhrase)
+        startPenaltyTick()
+        publish()
+    }
+
+    private fun startPenaltyTick() {
+        lastPenaltyTickMs = SystemClock.elapsedRealtime()
+        handler.removeCallbacks(penaltyTick)
+        handler.postDelayed(penaltyTick, 1_000)
+    }
+
+    /** After a call, an emergency pause or a restart of the screen: the penalty picks up again. */
+    private fun resumePenaltyIfNeeded() {
+        if (penaltyLeftMs <= 0 || overlay.isShowing || !lockEnabled) return
+        if (overlay.show(lockMessage())) {
+            overlay.showPenalty((penaltyLeftMs + 999) / 1000, penaltyNeedsPhrase)
+            startPenaltyTick()
+        }
+    }
+
+    private fun releasePenalty() {
+        penaltyLeftMs = 0
+        penaltyNeedsPhrase = false
+        handler.removeCallbacks(penaltyTick)
+        if (engine.phase != Phase.ALARMING && !stickyLock) overlay.hide()
+        publish()
+    }
+
+    private fun lockMessage(): String {
+        val now = System.currentTimeMillis()
+        val urgent = Plan.mostUrgent(PlanStore.load(this), now)
+        return urgent?.let { Plan.lockMessage(it, now) } ?: LockMessages.pick(messageIndex++)
     }
 
     private fun markGuardedTonight() {
@@ -346,9 +476,11 @@ class GuardService : LifecycleService(), SensorEventListener {
                     engine.lastLockWasRepeat || overlay.isShowing -> engageLock() // no second warning
                     else -> {
                         alarm.warn()
+                        alarm.enforceVolume() // turning it down during the warning counts too
                         warningUntilMs = lockStartedMs + WARNING_MS
                         handler.removeCallbacks(warningTick)
                         handler.post(warningTick)
+                        startVolumeWatch()
                     }
                 }
                 publish()
@@ -361,7 +493,10 @@ class GuardService : LifecycleService(), SensorEventListener {
                 faceChecker.cancel() // a strict-mode re-check may still be running
                 overlay.hideRingLight()
                 overlay.hideWarning()
-                if (!stickyLock) overlay.hide()
+                when {
+                    penaltyLeftMs > 0 && overlay.isShowing -> startPenaltyTick() // sat up, penalty remains
+                    !stickyLock -> overlay.hide()
+                }
                 if (lockStartedMs > 0) {
                     val lockedMs = SystemClock.elapsedRealtime() - lockStartedMs
                     StatsStore.update(this) { it.copy(lockedMs = it.lockedMs + lockedMs) }
@@ -377,11 +512,17 @@ class GuardService : LifecycleService(), SensorEventListener {
         handler.removeCallbacks(warningTick)
         warningUntilMs = 0
         overlay.hideWarning()
-        overlay.show(LockMessages.pick(messageIndex++))
-        alarm.start()
+        overlay.show(lockMessage())
+        alarm.start(vibrateAtMax = TamperPenalty.startsAtMaxVibration(StatsStore.tampersTonight(this)))
+        startVolumeWatch()
         handler.removeCallbacks(stopSound)
         handler.postDelayed(stopSound, LOCKED_SOUND_MS)
         publish()
+    }
+
+    private fun startVolumeWatch() {
+        handler.removeCallbacks(volumeWatch)
+        handler.postDelayed(volumeWatch, VOLUME_CHECK_MS)
     }
 
     private fun onFaceResult(face: FaceObservation?, report: CheckReport) {
@@ -471,6 +612,8 @@ class GuardService : LifecycleService(), SensorEventListener {
             unregisterReceiver(screenReceiver)
             handler.removeCallbacks(stopSound)
             handler.removeCallbacks(warningTick)
+            handler.removeCallbacks(penaltyTick)
+            handler.removeCallbacks(volumeWatch)
             alarm.stop()
             overlay.hideAll()
             faceChecker.release()
@@ -494,6 +637,9 @@ class GuardService : LifecycleService(), SensorEventListener {
         private const val UNLOCKED_SOUND_MS = 60_000L
         private const val EMERGENCY_PAUSE_MS = 180_000L
         private const val WARNING_MS = 10_000L
+        private const val VOLUME_CHECK_MS = 400L
+        private const val TAMPER_DEBOUNCE_MS = 3_000L
+        private const val MAX_PENALTY_MS = 30 * 60_000L
         const val DEFAULT_DELAY_SEC = 20
 
         /** Must be called while the app is visible (Android's while-in-use camera rule). */

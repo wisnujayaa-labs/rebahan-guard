@@ -37,6 +37,12 @@ enum class Pose(val isSuspicious: Boolean) {
 
     /** Sensor reading too small to trust (e.g. free fall, sensor glitch). */
     UNKNOWN(isSuspicious = false),
+
+    /**
+     * Face down on a desk: same gravity reading as [FACE_DOWN], but the proximity sensor is
+     * covered and the phone is perfectly still. Set by [DeskRest], never by [PoseClassifier].
+     */
+    RESTING(isSuspicious = false),
 }
 
 /**
@@ -61,6 +67,7 @@ data class Orientation(
             pose = pose,
             screenElevationDeg = when (pose) {
                 Pose.FACE_DOWN -> -60f
+                Pose.RESTING -> -85f
                 Pose.FACE_UP -> 60f
                 Pose.TILTED -> 30f
                 Pose.UNKNOWN -> Float.NaN

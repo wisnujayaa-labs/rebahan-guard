@@ -62,7 +62,7 @@ object LyingJudge {
                 } else {
                     Verdict.NOT_LYING
                 }
-            Pose.FACE_DOWN, Pose.UNKNOWN -> Verdict.NO_EVIDENCE
+            Pose.FACE_DOWN, Pose.UNKNOWN, Pose.RESTING -> Verdict.NO_EVIDENCE
         }
     }
 
@@ -107,7 +107,7 @@ object LyingJudge {
                 tilt != null && tilt >= config.minHeadTiltDeg
             }
 
-            Pose.FACE_UP, Pose.UNKNOWN -> false
+            Pose.FACE_UP, Pose.UNKNOWN, Pose.RESTING -> false
         }
     }
 

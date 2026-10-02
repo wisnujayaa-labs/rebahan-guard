@@ -39,6 +39,8 @@ data class NightRecord(
     val caught: Int = 0,
     val lockedMs: Long = 0,
     val emergencies: Int = 0,
+    /** Times the alarm volume was turned down while locked. */
+    val tampers: Int = 0,
 )
 
 /**
@@ -68,11 +70,11 @@ object NightStats {
         val byNight = records.associateBy { it.night }
         var n = tonight
         val t = byNight[tonight]
-        if (t == null || t.caught == 0) n-- // tonight is still in progress (or unused)
+        if (t == null || (t.caught == 0 && t.tampers == 0)) n-- // tonight is still in progress (or unused)
         var count = 0
         while (true) {
             val r = byNight[n] ?: break
-            if (!r.guarded || r.caught > 0) break
+            if (!r.guarded || r.caught > 0 || r.tampers > 0) break
             count++
             n--
         }
@@ -83,9 +85,10 @@ object NightStats {
     fun summary(records: List<NightRecord>, tonight: Int, partnerName: String?): String {
         val week = records.filter { it.night in (tonight - 6)..tonight && it.guarded }
         val caught = week.sumOf { it.caught }
-        val clean = week.count { it.caught == 0 }
+        val clean = week.count { it.caught == 0 && it.tampers == 0 }
         val minutes = week.sumOf { it.lockedMs } / 60_000
         val emergencies = week.sumOf { it.emergencies }
+        val tampers = week.sumOf { it.tampers }
         val greeting = if (partnerName.isNullOrBlank()) "" else "Halo $partnerName, "
         return buildString {
             append("${greeting}ini laporan Rebahan Guard-ku 7 malam terakhir:\n")
@@ -93,6 +96,7 @@ object NightStats {
             append("• Malam bersih (tidak ketahuan rebahan): $clean\n")
             append("• Ketahuan rebahan: $caught kali, total terkunci $minutes menit\n")
             if (emergencies > 0) append("• Tombol Darurat dipakai: $emergencies kali\n")
+            if (tampers > 0) append("• PELANGGARAN: mencoba mengecilkan volume alarm $tampers kali\n")
             append("• Streak sekarang: ${streak(records, tonight)} malam")
         }
     }

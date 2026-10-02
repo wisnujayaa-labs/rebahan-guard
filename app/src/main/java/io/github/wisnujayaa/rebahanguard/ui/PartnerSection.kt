@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.view.WindowManager
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -76,8 +77,9 @@ fun PartnerSection(editable: Boolean, onChanged: () -> Unit = {}) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(Night.Dusk.copy(alpha = 0.7f))
+            .clip(RoundedCornerShape(24.dp))
+            .background(Tone.Dusk)
+            .border(1.dp, Tone.Hairline, RoundedCornerShape(24.dp))
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -92,7 +94,7 @@ fun PartnerSection(editable: Boolean, onChanged: () -> Unit = {}) {
                     "minta izin ke dia dulu."
             },
             style = MaterialTheme.typography.bodySmall,
-            color = Night.Muted,
+            color = Tone.Muted,
         )
 
         when (val s = step) {
