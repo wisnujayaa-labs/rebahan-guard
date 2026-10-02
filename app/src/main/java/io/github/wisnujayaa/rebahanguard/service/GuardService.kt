@@ -381,7 +381,7 @@ class GuardService : LifecycleService(), SensorEventListener {
 
         // Sessions need the phone's real orientation even when it is locked on a desk stand or
         // outside the schedule (the guard's own reading is UNKNOWN then).
-        if (values.size >= 3) {
+        if (values != null && values.size >= 3) {
             sessionOrientation = DeskRest.resolve(
                 PoseClassifier.measure(values[0], values[1], values[2], config.lyingElevationDeg),
                 proximityNear,
