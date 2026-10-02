@@ -20,14 +20,30 @@ class StrictModeService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
         val pkg = e.packageName?.toString() ?: return
-        if (e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        if (e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isRealActivity(pkg, e.className?.toString())) {
             ForegroundApp.pkg.value = pkg
             ForegroundApp.atElapsedMs = SystemClock.elapsedRealtime()
+            ForegroundApp.atWallMs = System.currentTimeMillis()
         }
         if (pkg in GUARDED_SYSTEM_PACKAGES && isProtectedNow() && showsThisApp()) {
             Log.i(TAG, "Leaving a page that could switch the guard off")
             performGlobalAction(GLOBAL_ACTION_BACK)
             performGlobalAction(GLOBAL_ACTION_HOME)
+        }
+    }
+
+    /**
+     * The notification shade, the keyboard and dialogs also fire window events; only an actual
+     * activity means the user switched apps (otherwise pulling down the shade would "leave" a
+     * blocked app).
+     */
+    private fun isRealActivity(pkg: String, cls: String?): Boolean {
+        if (pkg == packageName || pkg == "com.android.systemui" || cls == null) return false
+        return try {
+            packageManager.getActivityInfo(android.content.ComponentName(pkg, cls), 0)
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 

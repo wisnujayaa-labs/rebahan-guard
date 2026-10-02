@@ -84,6 +84,8 @@ class SessionRunner(
     private val notify: (String) -> Unit,
     /** The alarm started: the service holds the volume up and counts attempts to lower it. */
     private val onAlarm: () -> Unit = {},
+    /** In a call or the emergency pause: no checks, no alarms. */
+    private val paused: () -> Boolean = { false },
 ) {
     private val handler = Handler(Looper.getMainLooper())
     private val rnd = Random(System.nanoTime())
@@ -155,11 +157,17 @@ class SessionRunner(
     private fun runDeskCheck() {
         val s = active ?: return
         if (s.proof != Proof.DESK) return
-        if (faceChecker.isChecking) { // the guard is using the camera right now: try again shortly
+        if (paused() || faceChecker.isChecking || CameraGate.photoInUse) {
+            // In a call, or the camera is busy (guard check, photo screen): try again shortly.
             handler.postDelayed(deskCheck, 15_000)
             return
         }
+        val sessionId = s.startedElapsedMs
+        // Watchdog: if the guard cancels this check (its callback never comes), look again.
+        handler.postDelayed(deskCheck, config.checkTimeoutMs + DeskRules.RECHECK_MS)
         faceChecker.check(owner = owner) { face, _ ->
+            if (active?.startedElapsedMs != sessionId) return@check // a newer session started meanwhile
+            handler.removeCallbacks(deskCheck)
             val now = SystemClock.elapsedRealtime()
             val verdict = DeskRules.judge(face, orientation(), config)
             val tally = active?.desk ?: return@check
@@ -184,7 +192,11 @@ class SessionRunner(
         }
     }
 
+    /** A call came in or the emergency button was pressed: silence any desk alarm. */
+    fun pauseAlarm() = clearAlarm()
+
     private fun raise(why: String) {
+        if (paused()) return
         SessionStore.update { it.copy(alarm = why) }
         alarm.start(vibrateAtMax = false)
         onAlarm()
@@ -216,7 +228,10 @@ class SessionRunner(
             Proof.MOVE -> if (s.unit == HabitUnit.MINUTES && now - lastStepMs < 15_000) credit(dt, 3)
             else -> Unit
         }
-        if (s.proof != Proof.DESK && now - s.startedElapsedMs >= s.targetMs) {
+        // Desk sessions end when enough time was confirmed; this cap ends them anyway if the
+        // camera could never confirm anything (dark room, phone moved, checks cancelled).
+        val limit = if (s.proof == Proof.DESK) s.targetMs * 2 else s.targetMs
+        if (now - s.startedElapsedMs >= limit) {
             notify("Waktu sesi “${s.title}” sudah habis.")
             stop()
         }

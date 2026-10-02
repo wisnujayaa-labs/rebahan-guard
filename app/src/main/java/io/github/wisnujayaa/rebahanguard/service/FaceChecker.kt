@@ -22,6 +22,11 @@ import io.github.wisnujayaa.rebahanguard.core.GuardConfig
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+/** Set while the in-app photo screen holds the camera. */
+object CameraGate {
+    @Volatile var photoInUse = false
+}
+
 /**
  * Turns the front camera on for a short window, runs on-device face detection (ML Kit) on
  * each frame and reports the largest face it saw, plus a [CheckReport] explaining the result.
@@ -83,6 +88,13 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
         s.timeout = timeout
         mainHandler.postDelayed(timeout, config.cameraWindowMs)
 
+        // The photo-proof screen is using the (back) camera: don't fight it for the hardware.
+        if (CameraGate.photoInUse) {
+            s.cameraUnavailable = true
+            finish(s)
+            return
+        }
+
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             if (s.done) return@addListener
@@ -98,7 +110,9 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
                     .build()
                 useCase.setAnalyzer(analysisExecutor) { proxy -> analyze(proxy, s) }
 
-                cameraProvider.unbindAll()
+                // Only our own previous use case: unbindAll() would also tear down the
+                // photo-proof preview, which shares the app-wide camera provider.
+                analysis?.let { cameraProvider.unbind(it) }
                 cameraProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, useCase)
                 analysis = useCase
             } catch (e: Exception) {

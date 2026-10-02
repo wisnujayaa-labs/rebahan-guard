@@ -67,8 +67,12 @@ fun PhotoProof(habit: Habit, onClose: () -> Unit) {
         }
     }
     DisposableEffect(lifecycleOwner) {
+        io.github.wisnujayaa.rebahanguard.service.CameraGate.photoInUse = true
         controller.bindToLifecycle(lifecycleOwner)
-        onDispose { controller.unbind() }
+        onDispose {
+            controller.unbind()
+            io.github.wisnujayaa.rebahanguard.service.CameraGate.photoInUse = false
+        }
     }
 
     EditorCard {

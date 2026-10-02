@@ -156,6 +156,7 @@ class GuardService : LifecycleService(), SensorEventListener {
 
     private lateinit var powerManager: PowerManager
     private lateinit var sessions: SessionRunner
+    private var sessionOrientation: Orientation = Orientation.UNKNOWN
     private lateinit var blocker: AppBlocker
     private var stepSensor: Sensor? = null
     private var stepRegistered = false
@@ -185,12 +186,14 @@ class GuardService : LifecycleService(), SensorEventListener {
             when (intent.action) {
                 Intent.ACTION_SCREEN_ON -> {
                     registerSensors()
+                    blocker.start()
                     GuardStatusStore.update { it.copy(screenOn = true) }
                 }
                 Intent.ACTION_SCREEN_OFF -> {
                     // Saves battery: nothing to guard while the screen is off — except during a
                     // desk session, where the camera checks need the phone's orientation.
                     if (!sessions.needsSensorsWithScreenOff) unregisterSensors()
+                    blocker.stop()
                     val wasLocked = engine.phase == Phase.ALARMING
                     if (wasLocked && overlay.isShowing) {
                         stickyLock = true
@@ -289,13 +292,14 @@ class GuardService : LifecycleService(), SensorEventListener {
             config = config,
             faceChecker = faceChecker,
             alarm = alarm,
-            orientation = { engine.lastOrientation },
+            orientation = { sessionOrientation },
             screenOn = { powerManager.isInteractive },
             notify = ::notifySession,
             onAlarm = ::startVolumeWatch,
+            paused = { isInCall() || SystemClock.elapsedRealtime() < emergencyUntilMs },
         )
         blocker = AppBlocker(this, focusReason = ::focusReason)
-        blocker.start()
+        if (powerManager.isInteractive) blocker.start()
         stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         strictWasOn = FocusStore.isStrictEnabled(this)
         handler.postDelayed(minuteTick, 60_000)
@@ -346,7 +350,10 @@ class GuardService : LifecycleService(), SensorEventListener {
 
     private fun unregisterSensors() {
         if (!sensorsRegistered) return
-        sensorManager.unregisterListener(this)
+        // One by one: unregisterListener(this) would also drop the step counter of a MOVE session.
+        gravitySensor?.let { sensorManager.unregisterListener(this, it) }
+        proximitySensor?.let { sensorManager.unregisterListener(this, it) }
+        rawAccelSensor?.let { sensorManager.unregisterListener(this, it) }
         sensorsRegistered = false
         stillness.reset()
         proximityNear = null
@@ -372,10 +379,24 @@ class GuardService : LifecycleService(), SensorEventListener {
         val filter = accelerometerFilter
         val values = if (filter != null) filter.update(event.values) else event.values
 
+        // Sessions need the phone's real orientation even when it is locked on a desk stand or
+        // outside the schedule (the guard's own reading is UNKNOWN then).
+        if (values.size >= 3) {
+            sessionOrientation = DeskRest.resolve(
+                PoseClassifier.measure(values[0], values[1], values[2], config.lyingElevationDeg),
+                proximityNear,
+                stillness.isStill(now),
+            )
+        }
+        // Screen off (sensors kept on only for a desk session): nobody is using the phone, so
+        // the lying check has nothing to look at.
+        if (!powerManager.isInteractive) return
+
         // Phone calls (including WhatsApp/VoIP), the emergency pause and hours outside the
         // schedule always win.
         val outside = !schedule.isWithin(Protection.minuteOfDay())
         if (isInCall() || now < emergencyUntilMs || outside) {
+            if (isInCall() || now < emergencyUntilMs) sessions.pauseAlarm()
             releaseStickyLock()
             perform(engine.onScreenOff())
             if (penaltyLeftMs > 0) overlay.hide() // paused, not forgiven
@@ -432,8 +453,10 @@ class GuardService : LifecycleService(), SensorEventListener {
 
         if (warningUntilMs > 0) engageLock() // no more warning for someone silencing it
         alarm.start(vibrateAtMax = TamperPenalty.startsAtMaxVibration(attempts)) // sound comes back
-        handler.removeCallbacks(stopSound)
-        handler.postDelayed(stopSound, LOCKED_SOUND_MS)
+        if (engine.phase == Phase.ALARMING || overlay.isShowing) {
+            handler.removeCallbacks(stopSound)
+            handler.postDelayed(stopSound, LOCKED_SOUND_MS)
+        } // else: a desk-session alarm, which the session stops when the user is back
         overlay.showTamper(attempts, (extra / TamperPenalty.MINUTE_MS).toInt(), penaltyNeedsPhrase)
         startPenaltyTick()
         publish()
@@ -486,6 +509,7 @@ class GuardService : LifecycleService(), SensorEventListener {
                 val habit = DreamStore.load(this).habit(intent.getLongExtra(EXTRA_HABIT, -1)) ?: return
                 sessions.start(habit, intent.getIntExtra(EXTRA_MINUTES, 25))
                 if (habit.proof == Proof.MOVE) registerSteps()
+                if (habit.proof == Proof.PLACE) enterForeground() // adds the location type if now allowed
                 if (habit.proof == Proof.DESK) registerSensors()
                 updateNotification("Sesi berjalan: ${habit.title}")
             }
@@ -517,8 +541,18 @@ class GuardService : LifecycleService(), SensorEventListener {
         stepRegistered = false
     }
 
-    /** Why focus mode is on right now (shown on the block screen), or null. */
+    private var focusCache: Pair<Long, String?> = 0L to null
+
+    /** Why focus mode is on right now; re-evaluated at most every 20 s (it reads files). */
     private fun focusReason(): String? {
+        val now = SystemClock.elapsedRealtime()
+        if (sessions.isRunning) return "sesi berjalan"
+        if (isInCall() || now < emergencyUntilMs) return null
+        if (now - focusCache.first < FOCUS_CACHE_MS) return focusCache.second
+        return computeFocusReason().also { focusCache = now to it }
+    }
+
+    private fun computeFocusReason(): String? {
         if (isInCall() || SystemClock.elapsedRealtime() < emergencyUntilMs) return null
         if (sessions.isRunning) return "sesi berjalan"
         val book = DreamStore.load(this)
@@ -589,6 +623,7 @@ class GuardService : LifecycleService(), SensorEventListener {
     private fun onEmergency() {
         if (!started) return
         emergencyUntilMs = SystemClock.elapsedRealtime() + EMERGENCY_PAUSE_MS
+        sessions.pauseAlarm()
         CommitmentStore.recordEmergency(this)
         StatsStore.update(this) { it.copy(emergencies = it.emergencies + 1) }
         stickyLock = false
@@ -611,7 +646,9 @@ class GuardService : LifecycleService(), SensorEventListener {
             Action.NONE -> Unit
             Action.START_CAMERA_CHECK -> faceChecker.check(
                 owner = this,
-                onDark = { if (lockEnabled) overlay.showRingLight() }, // light the face in a dark room
+                // Light the face in a dark room — but never over the lock screen, where it would
+                // hide the emergency button and flash full white at night.
+                onDark = { if (lockEnabled && !overlay.isShowing) overlay.showRingLight() },
             ) { face, report -> onFaceResult(face, report) }
             Action.CANCEL_CAMERA_CHECK -> {
                 faceChecker.cancel()
@@ -809,10 +846,19 @@ class GuardService : LifecycleService(), SensorEventListener {
         private const val SESSION_NOTIFICATION_ID = 2
         private const val NAG_EVERY_MS = 20 * 60_000L
         private const val FOCUS_DEADLINE_MS = 6 * 3_600_000L
+        private const val FOCUS_CACHE_MS = 20_000L
         const val DEFAULT_DELAY_SEC = 20
 
         /** Must be called while the app is visible (Android's while-in-use camera rule). */
         fun start(context: Context, settings: GuardSettings, extra: Intent? = null) {
+            // Without the camera permission startForeground() would throw, and Android kills an
+            // app whose startForegroundService() never reaches the foreground.
+            if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                Log.w(TAG, "Camera permission missing; not starting the guard")
+                return
+            }
             val intent = Intent(context, GuardService::class.java)
                 .apply { if (extra != null) { action = extra.action; extra.extras?.let { putExtras(it) } } }
                 .putExtra(EXTRA_DELAY_SEC, settings.delaySec)

@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 object ForegroundApp {
     val pkg = MutableStateFlow<String?>(null)
     @Volatile var atElapsedMs = 0L
+    @Volatile var atWallMs = 0L
 }
 
 /**
@@ -94,11 +95,22 @@ class AppBlocker(
         }
     }
 
+    private var foregroundAtWallMs = 0L
+
+    /** The newest of: the last usage "resumed" event, and the strict-mode report. */
     private fun currentForeground(): String? {
-        val now = SystemClock.elapsedRealtime()
-        // Strict mode reports instantly; trust it if it's fresh.
-        if (now - ForegroundApp.atElapsedMs < 5_000) ForegroundApp.pkg.value?.let { foreground = it }
-        if (!FocusStore.hasUsageAccess(context)) return foreground
+        val strictPkg = ForegroundApp.pkg.value
+        val strictAt = ForegroundApp.atWallMs
+        fun preferStrict() {
+            if (strictPkg != null && strictAt > foregroundAtWallMs) {
+                foreground = strictPkg
+                foregroundAtWallMs = strictAt
+            }
+        }
+        if (!FocusStore.hasUsageAccess(context)) {
+            preferStrict()
+            return foreground
+        }
         try {
             val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
             val end = System.currentTimeMillis()
@@ -108,11 +120,15 @@ class AppBlocker(
             val e = UsageEvents.Event()
             while (events.hasNextEvent()) {
                 events.getNextEvent(e)
-                if (e.eventType == UsageEvents.Event.ACTIVITY_RESUMED) foreground = e.packageName
+                if (e.eventType == UsageEvents.Event.ACTIVITY_RESUMED && e.timeStamp >= foregroundAtWallMs) {
+                    foreground = e.packageName
+                    foregroundAtWallMs = e.timeStamp
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Usage query failed", e)
         }
+        preferStrict()
         return foreground
     }
 
