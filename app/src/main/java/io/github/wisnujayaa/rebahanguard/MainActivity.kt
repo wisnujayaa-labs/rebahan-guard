@@ -782,6 +782,8 @@ private fun ScheduleRow(settings: GuardSettings, editable: Boolean, onChange: (G
         thumbColor = Tone.Lamp,
         activeTrackColor = Tone.Lamp,
         inactiveTrackColor = Tone.Hairline,
+        activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
+        inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
     )
     SettingRow(
         "Jadwal jaga",
@@ -846,11 +848,13 @@ private fun CommitmentRow(settings: GuardSettings, editable: Boolean, onChange: 
                 thumbColor = Tone.Lamp,
                 activeTrackColor = Tone.Lamp,
                 inactiveTrackColor = Tone.Hairline,
+        activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
+        inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
             ),
         )
         Text(
-            "Selama komitmen, penjaga tidak bisa dimatikan begitu saja: harus menunggu 2 menit " +
-                "dan mengetik sebuah kalimat. Tujuannya mengalahkan rasa malas sesaat.",
+            "Selama komitmen, penjaga tidak bisa dimatikan begitu saja: perlu kode dari temanmu, " +
+                "atau menunggu lalu mengetik sebuah pengakuan panjang. Tujuannya mengalahkan rasa malas sesaat.",
             style = MaterialTheme.typography.bodySmall,
             color = Tone.Muted,
         )
@@ -919,6 +923,8 @@ private fun DelayRow(settings: GuardSettings, editable: Boolean, onChange: (Guar
                 thumbColor = Tone.Lamp,
                 activeTrackColor = Tone.Lamp,
                 inactiveTrackColor = Tone.Hairline,
+        activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
+        inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
             ),
         )
     }
