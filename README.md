@@ -93,6 +93,41 @@ thing traded for lying in bed) and *later*. The nearest deadline is what the loc
 about. Stored in app-private storage through `AtomicFile` (a crash mid-write keeps the previous
 version), with a versioned, fuzz-tested text codec.
 
+### Dreams → habits → proof
+
+The **Impian** tab holds up to three dreams, each with the user's own reason ("why"), written
+freely or composed from templates in a 3-step writer. Dreams carry habits (minutes, pages,
+steps or times per day, on chosen weekdays, optionally in a time window). The lock screen quotes
+the user's own sentence back. **Lighter changes wait until tomorrow** (lower target, fewer days,
+weaker proof, deleting a habit, editing the "why"): the tired self of tonight can't undo what the
+clear-headed self decided. Each habit chooses how it is proven:
+
+| Proof | How | Strength |
+|---|---|---|
+| Mode Meja | Phone on a stand; the front camera checks at **random (exponential) intervals** that a face is there with the head upright — catches lying down even without the phone | ●●● |
+| Gerak | Step counter + cadence (walk vs run), survives reboots | ●●● |
+| Fokus tanpa HP | Time counts only while the screen is off or the phone rests face down | ●●○ |
+| Tempat | Saved place: GPS fix + Wi-Fi BSSID fingerprint (Jaccard overlap) | ●●○ |
+| Foto hasil | Live photo in the app; on-device OCR detects a *new* page and its page number | ●●○ |
+| Kejujuran | Ticked by hand, reported as such | ●○○ |
+
+The partner report shows the strength of each proof, not just ticks.
+
+### Retrieval practice
+
+Photographed pages become **cloze questions** (a key word blanked out, never one that appears
+twice in the sentence), graded offline with one-typo tolerance and spaced 1/3/7/14/30 days
+(Leitner). Wrong answers are never punished — only rescheduled.
+
+### Focus mode
+
+During a session, a habit window, a deadline < 6 h or the schedule, distracting apps (social,
+video, games, shopping; editable) are covered by a calm full-screen window. One tap goes back to
+work; staying needs a 30-second wait for one of **two 5-minute passes per day** (after the
+*one sec* study, PNAS 2023). Foreground detection: Usage Access (polled), or instantly via the
+optional **strict mode** (Accessibility), which also backs out of this app's *App info*,
+*uninstall* and *Accessibility* pages during protected time.
+
 ### Face down on a desk vs. held above your face
 
 To the gravity sensor these are identical (screen towards the floor). `DeskRest` separates them
@@ -168,6 +203,19 @@ app/src/main/java/io/github/wisnujayaa/rebahanguard/
 
 The engine never touches hardware: it returns an `Action` (`START_CAMERA_CHECK`, `START_ALARM`, …) and the service performs it. This keeps the logic testable and the Android layer thin.
 
+## Permissions, and why
+
+| Permission | Used for | When |
+|---|---|---|
+| Camera | posture checks, Mode Meja, photo proof | frames analysed in memory; proof photos stay on the phone 7 days |
+| Display over other apps | lock screen, focus window | — |
+| Usage access | which app is in front (focus mode) | — |
+| Accessibility (optional) | instant focus mode, protecting App info during protected time | reads window titles only |
+| Activity recognition | step counter | Gerak sessions |
+| Location + Wi-Fi state | saved places | only during Tempat sessions or when saving a place; only the distance is used |
+
+There is still **no INTERNET permission**: nothing can leave the phone.
+
 ## Security & privacy
 
 | Threat / risk | Mitigation |
@@ -215,9 +263,9 @@ All decision logic is pure Kotlin, so it is tested on the JVM in well under a se
 - [ ] Very dark rooms can make face detection fail (screen light usually helps)
 - [ ] Instrumented (on-device) tests for the service and camera layer
 - [ ] Some OEM battery savers (Xiaomi, Oppo, vivo) may kill the service — whitelist the app
-- [ ] v1.6 — Dreams → goals → habits, with a commitment sentence (own words or templates) on the lock screen
-- [ ] v1.7 — Focus mode: block distracting apps (Usage Access), 2× "5 more minutes" per day
-- [ ] v1.8 — Strict mode (Accessibility), proof of habits by steps, place (GPS + Wi-Fi fingerprint) or photo
+- [x] v1.6–v1.8 — dreams & habits, Mode Meja, focus mode, strict mode, step/place/photo proof, quiz
+- [ ] Questions from an on-device LLM (Gemini Nano via ML Kit Prompt API) where supported — still alpha, best on Pixel 10
+- [ ] Laptop as a witness: browser extension + HMAC-signed QR summary (no server)
 - [ ] Learn the threshold from more than one feature (e.g. add head pitch) — a small logistic regression
 
 ## Releases
