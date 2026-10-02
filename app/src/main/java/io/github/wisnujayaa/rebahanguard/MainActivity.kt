@@ -10,6 +10,7 @@ import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -34,11 +35,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SliderDefaults
@@ -47,8 +50,11 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,15 +63,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import io.github.wisnujayaa.rebahanguard.core.AlarmSoundPolicy
 import io.github.wisnujayaa.rebahanguard.core.Calibrator
+import io.github.wisnujayaa.rebahanguard.core.Commitment
+import io.github.wisnujayaa.rebahanguard.core.EmergencyStop
 import io.github.wisnujayaa.rebahanguard.core.Phase
 import io.github.wisnujayaa.rebahanguard.core.Pose
 import io.github.wisnujayaa.rebahanguard.core.SensorInput
 import io.github.wisnujayaa.rebahanguard.service.AlarmPlayer
+import io.github.wisnujayaa.rebahanguard.service.CommitmentStore
 import io.github.wisnujayaa.rebahanguard.service.GuardService
 import io.github.wisnujayaa.rebahanguard.service.GuardSettings
 import io.github.wisnujayaa.rebahanguard.service.GuardStatus
@@ -112,18 +124,52 @@ private fun GuardScreen() {
     val liveAngle by rememberLiveScreenElevation()
     var settings by remember { mutableStateOf(GuardSettings.load(context)) }
     var cameraDenied by remember { mutableStateOf(false) }
+    var needsOverlayPermission by remember { mutableStateOf(false) }
+    var confirmCommitment by remember { mutableStateOf(false) }
+    var showEmergencyStop by remember { mutableStateOf(false) }
+
+    // Commitment state is re-read regularly: it ends on its own when the time is up.
+    var commitmentLeftMs by remember { mutableLongStateOf(CommitmentStore.remainingMs(context)) }
+    LaunchedEffect(status.running) {
+        while (true) {
+            commitmentLeftMs = CommitmentStore.remainingMs(context)
+            delay(15_000)
+        }
+    }
+    val committed = commitmentLeftMs > 0
 
     fun update(newSettings: GuardSettings) {
         settings = newSettings.sanitized()
         settings.save(context)
     }
 
+    fun overlayReady() = !settings.lockScreen || Settings.canDrawOverlays(context)
+
+    fun hasPermissions() = requiredPermissions().all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /** Starts the guard; begins the commitment first if one is configured and none is running. */
+    fun launchGuard(beginCommitment: Boolean) {
+        if (!overlayReady()) {
+            needsOverlayPermission = true
+            return
+        }
+        needsOverlayPermission = false
+        if (beginCommitment && settings.commitmentHours > 0 && !CommitmentStore.isActive(context)) {
+            CommitmentStore.begin(context, settings.commitmentHours)
+            commitmentLeftMs = CommitmentStore.remainingMs(context)
+        }
+        GuardService.start(context, settings)
+    }
+
+    var pendingCommitment by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { granted ->
         if (granted[Manifest.permission.CAMERA] == true) {
             cameraDenied = false
-            GuardService.start(context, settings)
+            launchGuard(beginCommitment = pendingCommitment)
         } else {
             // After "Don't ask again" Android returns instantly with no dialog: say why
             // nothing happened instead of failing silently.
@@ -131,14 +177,23 @@ private fun GuardScreen() {
         }
     }
 
-    fun startGuard() {
+    fun startGuard(beginCommitment: Boolean) {
+        pendingCommitment = beginCommitment
         val missing = requiredPermissions().filter {
             ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) GuardService.start(context, settings) else permissionLauncher.launch(missing.toTypedArray())
+        if (missing.isEmpty()) launchGuard(beginCommitment) else permissionLauncher.launch(missing.toTypedArray())
     }
 
-    val editable = !status.running
+    // During a commitment, opening the app is enough to bring the guard back (after a restart,
+    // a force stop or a battery saver).
+    LaunchedEffect(status.running, committed) {
+        if (committed && !status.running && hasPermissions() && overlayReady()) {
+            GuardService.start(context, settings)
+        }
+    }
+
+    val editable = !status.running && !committed
 
     Column(
         modifier = Modifier
@@ -159,8 +214,25 @@ private fun GuardScreen() {
 
         StatusLines(status)
 
-        if (status.running) {
-            OutlinedButton(
+        if (committed) CommitmentBanner(commitmentLeftMs)
+
+        when {
+            committed && showEmergencyStop -> EmergencyStopPanel(
+                onStopped = {
+                    CommitmentStore.clear(context)
+                    commitmentLeftMs = 0
+                    showEmergencyStop = false
+                    GuardService.stop(context)
+                },
+                onCancel = { showEmergencyStop = false },
+            )
+
+            committed && status.running -> TextButton(
+                onClick = { showEmergencyStop = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Matikan darurat", color = Night.Muted) }
+
+            status.running -> OutlinedButton(
                 onClick = { GuardService.stop(context) },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -168,34 +240,40 @@ private fun GuardScreen() {
                 shape = CircleShape,
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Night.Text),
             ) { Text("Matikan penjaga", style = MaterialTheme.typography.titleMedium) }
-        } else {
-            Button(
-                onClick = { startGuard() },
+
+            else -> Button(
+                onClick = {
+                    if (settings.commitmentHours > 0 && !committed) confirmCommitment = true
+                    else startGuard(beginCommitment = false)
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
                 shape = CircleShape,
-            ) { Text("Nyalakan penjaga", style = MaterialTheme.typography.titleMedium) }
-        }
-
-        if (cameraDenied) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Night.Blanket.copy(alpha = 0.22f))
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "Izin kamera ditolak. Tanpa kamera, aplikasi tidak bisa memastikan kamu rebahan.",
-                    style = MaterialTheme.typography.bodyMedium,
+                    if (settings.commitmentHours > 0 && !committed) "Nyalakan dan berkomitmen" else "Nyalakan penjaga",
+                    style = MaterialTheme.typography.titleMedium,
                 )
-                TextButton(onClick = { openAppSettings(context) }) { Text("Buka pengaturan izin") }
             }
         }
 
-        SettingsPanel(settings, editable, ::update)
+        if (needsOverlayPermission) {
+            Notice(
+                "Agar bisa mengunci layar, izinkan Rebahan Guard tampil di atas aplikasi lain. " +
+                    "Setelah itu kembali ke sini dan nyalakan lagi.",
+                action = "Buka izin tampil di atas" to { openOverlaySettings(context) },
+            )
+        }
+
+        if (cameraDenied) {
+            Notice(
+                "Izin kamera ditolak. Tanpa kamera, aplikasi tidak bisa memastikan kamu rebahan.",
+                action = "Buka pengaturan izin" to { openAppSettings(context) },
+            )
+        }
+
+        SettingsPanel(settings, editable, committed, ::update)
 
         Text(
             "Gambar kamera dianalisis di HP lalu dibuang. Aplikasi ini tidak punya izin internet.",
@@ -203,6 +281,137 @@ private fun GuardScreen() {
             color = Night.Muted,
         )
         Spacer(Modifier.height(8.dp))
+    }
+
+    if (confirmCommitment) {
+        val until = SimpleDateFormat("HH:mm", Locale.getDefault())
+            .format(Date(System.currentTimeMillis() + settings.commitmentHours * Commitment.HOUR_MS))
+        AlertDialog(
+            onDismissRequest = { confirmCommitment = false },
+            containerColor = Night.Dusk,
+            title = { Text("Berkomitmen sampai $until?") },
+            text = {
+                Text(
+                    "Sampai pukul $until, penjaga tidak bisa dimatikan begitu saja. Jalan keluarnya " +
+                        "hanya matikan darurat: tunggu 2 menit lalu ketik sebuah kalimat. Telepon " +
+                        "dan tombol Darurat di layar kunci tetap selalu bisa dipakai.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmCommitment = false
+                    startGuard(beginCommitment = true)
+                }) { Text("Mulai komitmen") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmCommitment = false }) { Text("Batal") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun Notice(text: String, action: Pair<String, () -> Unit>) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(Night.Blanket.copy(alpha = 0.22f))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.bodyMedium)
+        TextButton(onClick = action.second) { Text(action.first) }
+    }
+}
+
+// ------------------------------------------------------------------------------ commitment
+
+@Composable
+private fun CommitmentBanner(leftMs: Long) {
+    val context = LocalContext.current
+    val until = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(System.currentTimeMillis() + leftMs))
+    val interruptions = remember(leftMs) { CommitmentStore.interruptions(context) }
+    val emergencies = remember(leftMs) { CommitmentStore.emergencies(context) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Berkomitmen sampai pukul $until.", style = MaterialTheme.typography.titleMedium, color = Night.Lamp)
+        val notes = buildList {
+            if (interruptions > 0) add("penjaga terputus $interruptions kali")
+            if (emergencies > 0) add("tombol Darurat dipakai $emergencies kali")
+        }
+        if (notes.isNotEmpty()) {
+            Text(
+                "Selama komitmen ini: ${notes.joinToString(", ")}.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Night.Muted,
+            )
+        }
+    }
+}
+
+/**
+ * The deliberately slow way out: the countdown only runs while this screen stays open, and
+ * restarts if the user leaves the app.
+ */
+@Suppress("DEPRECATION")
+@Composable
+private fun EmergencyStopPanel(onStopped: () -> Unit, onCancel: () -> Unit) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var startedAt by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var typed by remember { mutableStateOf("") }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                startedAt = SystemClock.elapsedRealtime() // left the app: start over
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = SystemClock.elapsedRealtime()
+            delay(500)
+        }
+    }
+
+    val waited = (now - startedAt).coerceAtLeast(0)
+    val leftSec = ((EmergencyStop.WAIT_MS - waited).coerceAtLeast(0) + 999) / 1000
+    val ready = EmergencyStop.canStop(waited, typed)
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(28.dp))
+            .background(Night.Dusk.copy(alpha = 0.7f))
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Matikan darurat", style = MaterialTheme.typography.titleMedium)
+        Text(
+            if (leftSec > 0) {
+                "Tunggu ${leftSec / 60}:${"%02d".format(leftSec % 60)} lagi dengan layar ini tetap terbuka. " +
+                    "Kalau kamu keluar dari aplikasi, hitungannya mulai dari awal."
+            } else {
+                "Waktu tunggu selesai."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = Night.Muted,
+        )
+        Text("Ketik kalimat ini:", style = MaterialTheme.typography.bodyMedium)
+        Text("\u201C${EmergencyStop.PHRASE}\u201D", style = MaterialTheme.typography.bodyLarge, color = Night.Lamp)
+        OutlinedTextField(
+            value = typed,
+            onValueChange = { typed = it.take(200) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onStopped, enabled = ready, shape = CircleShape) { Text("Matikan penjaga") }
+            TextButton(onClick = onCancel) { Text("Tetap menyala") }
+        }
     }
 }
 
@@ -215,7 +424,7 @@ private fun StatusLines(status: GuardStatus) {
         !status.screenOn -> "Layar mati, penjaga ikut istirahat." to "Begitu layar menyala, pengawasan lanjut."
         status.phase == Phase.WATCHING -> "Mengawasi." to "HP-mu ${poseLabel(status.pose)}."
         status.phase == Phase.CHECKING -> "Kamera sedang memastikan…" to "Hanya beberapa detik, gambar tidak disimpan."
-        status.phase == Phase.ALARMING -> "Ketahuan rebahan." to "Duduk dulu, alarmnya berhenti sendiri."
+        status.phase == Phase.ALARMING -> "Ketahuan rebahan." to "Layar terkunci sampai kamu duduk."
         else -> "Aman." to "Cek berikutnya sebentar lagi."
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -246,7 +455,12 @@ private fun StatusLines(status: GuardStatus) {
 
 /** One quiet panel; rows separated by hairlines instead of a stack of cards. */
 @Composable
-private fun SettingsPanel(settings: GuardSettings, editable: Boolean, onChange: (GuardSettings) -> Unit) {
+private fun SettingsPanel(
+    settings: GuardSettings,
+    editable: Boolean,
+    committed: Boolean,
+    onChange: (GuardSettings) -> Unit,
+) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -255,12 +469,16 @@ private fun SettingsPanel(settings: GuardSettings, editable: Boolean, onChange: 
     ) {
         if (!editable) {
             Text(
-                "Matikan penjaga dulu untuk mengubah pengaturan.",
+                if (committed) "Pengaturan terkunci selama komitmen." else "Matikan penjaga dulu untuk mengubah pengaturan.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Night.Lamp,
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp),
             )
         }
+        CommitmentRow(settings, editable, onChange)
+        Divider()
+        LockRow(settings, editable, onChange)
+        Divider()
         DelayRow(settings, editable, onChange)
         Divider()
         ThresholdRow(settings, editable, onChange)
@@ -268,6 +486,55 @@ private fun SettingsPanel(settings: GuardSettings, editable: Boolean, onChange: 
         StrictRow(settings, editable, onChange)
         Divider()
         SoundRow(settings, editable, onChange)
+    }
+}
+
+@Composable
+private fun CommitmentRow(settings: GuardSettings, editable: Boolean, onChange: (GuardSettings) -> Unit) {
+    var value by remember(settings.commitmentHours) { mutableStateOf(settings.commitmentHours.toFloat()) }
+    val hours = value.roundToInt()
+    SettingRow("Komitmen", if (hours == 0) "tidak ada" else "$hours jam") {
+        Slider(
+            value = value,
+            onValueChange = { value = it },
+            onValueChangeFinished = { onChange(settings.copy(commitmentHours = value.roundToInt())) },
+            valueRange = 0f..Commitment.MAX_HOURS.toFloat(),
+            steps = Commitment.MAX_HOURS - 1,
+            enabled = editable,
+            colors = SliderDefaults.colors(
+                thumbColor = Night.Lamp,
+                activeTrackColor = Night.Lamp,
+                inactiveTrackColor = Night.Hairline,
+            ),
+        )
+        Text(
+            "Selama komitmen, penjaga tidak bisa dimatikan begitu saja: harus menunggu 2 menit " +
+                "dan mengetik sebuah kalimat. Tujuannya mengalahkan rasa malas sesaat.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Night.Muted,
+        )
+    }
+}
+
+@Composable
+private fun LockRow(settings: GuardSettings, editable: Boolean, onChange: (GuardSettings) -> Unit) {
+    SettingRow(
+        "Kunci layar saat rebahan",
+        trailing = {
+            Switch(
+                checked = settings.lockScreen,
+                onCheckedChange = { onChange(settings.copy(lockScreen = it)) },
+                enabled = editable,
+                colors = SwitchDefaults.colors(checkedThumbColor = Night.Ink, checkedTrackColor = Night.Lamp),
+            )
+        },
+    ) {
+        Text(
+            "Layar tertutup sampai kamu duduk. Telepon masuk tidak pernah diblokir, dan tombol " +
+                "Darurat selalu ada. Paling lama 5 menit per kejadian.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Night.Muted,
+        )
     }
 }
 
@@ -549,6 +816,18 @@ private fun poseLabel(pose: Pose) = when (pose) {
     Pose.FACE_UP -> "tergeletak, layar ke atas"
     Pose.TILTED -> "agak miring"
     Pose.UNKNOWN -> "sedang dibaca sensornya"
+}
+
+private fun openOverlaySettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        Uri.fromParts("package", context.packageName, null),
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        openAppSettings(context)
+    }
 }
 
 private fun openAppSettings(context: Context) {

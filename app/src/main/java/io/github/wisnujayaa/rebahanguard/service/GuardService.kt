@@ -10,12 +10,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -33,12 +36,17 @@ import io.github.wisnujayaa.rebahanguard.core.GravityFilter
 import io.github.wisnujayaa.rebahanguard.core.Phase
 import io.github.wisnujayaa.rebahanguard.core.AlarmSoundPolicy
 import io.github.wisnujayaa.rebahanguard.core.LyingJudge
+import io.github.wisnujayaa.rebahanguard.core.Orientation
+import io.github.wisnujayaa.rebahanguard.core.Pose
 import io.github.wisnujayaa.rebahanguard.core.PoseClassifier
 import io.github.wisnujayaa.rebahanguard.core.SensorInput
 
 /**
  * Foreground service (type = camera) that glues the hardware to [GuardEngine]:
- * gravity sensor → engine → camera / alarm.
+ * gravity sensor → engine → camera / lock screen / alarm.
+ *
+ * Safety rules enforced here, outside the engine: phone calls are never blocked, the lock screen
+ * always offers an emergency exit, and no lock outlives GuardConfig.maxLockMs.
  *
  * It is a [LifecycleService] so CameraX can bind the camera to the service's lifecycle.
  */
@@ -51,6 +59,22 @@ class GuardService : LifecycleService(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
 
     private lateinit var keyguardManager: KeyguardManager
+    private lateinit var audioManager: AudioManager
+    private lateinit var overlay: LockOverlay
+    private val handler = Handler(Looper.getMainLooper())
+    private val stopSound = Runnable { alarm.stop() }
+
+    private var lockEnabled = true
+
+    /**
+     * The overlay stays up across a screen-off that happened while locked, so turning the screen
+     * off and on again is not a way out. It goes away once the user is shown not to be lying.
+     */
+    private var stickyLock = false
+    private var stickySinceMs = 0L
+
+    /** "Darurat" pressed on the lock screen: the guard pauses until this time. */
+    private var emergencyUntilMs = 0L
 
     private var gravitySensor: Sensor? = null
     private var accelerometerFilter: GravityFilter? = null
@@ -70,6 +94,11 @@ class GuardService : LifecycleService(), SensorEventListener {
                 Intent.ACTION_SCREEN_OFF -> {
                     // Saves battery: nothing to guard while the screen is off.
                     unregisterSensors()
+                    val wasLocked = engine.phase == Phase.ALARMING
+                    if (wasLocked && overlay.isShowing) {
+                        stickyLock = true
+                        stickySinceMs = SystemClock.elapsedRealtime()
+                    }
                     perform(engine.onScreenOff())
                     publish(screenOn = false)
                 }
@@ -81,7 +110,8 @@ class GuardService : LifecycleService(), SensorEventListener {
         super.onStartCommand(intent, flags, startId)
 
         if (intent?.action == ACTION_STOP) {
-            stopSelf()
+            // During a commitment the only way out is the emergency stop inside the app.
+            if (!CommitmentStore.isActive(this)) stopSelf()
             return START_NOT_STICKY
         }
         if (started) return START_NOT_STICKY
@@ -106,7 +136,12 @@ class GuardService : LifecycleService(), SensorEventListener {
             lyingElevationDeg = lyingElevationDeg,
             strictMode = intent?.getBooleanExtra(EXTRA_STRICT, false) ?: false,
         )
+        lockEnabled = intent?.getBooleanExtra(EXTRA_LOCK, true) ?: true
         engine = GuardEngine(config)
+        overlay = LockOverlay(this, onEmergency = ::onEmergency)
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        CommitmentStore.onGuardStart(this)
+        BootReceiver.dismiss(this)
         faceChecker = FaceChecker(this, config)
         alarm = AlarmPlayer(this, alarmSound?.let(Uri::parse))
 
@@ -181,14 +216,62 @@ class GuardService : LifecycleService(), SensorEventListener {
         val filter = accelerometerFilter
         val values = if (filter != null) filter.update(event.values) else event.values
 
+        val now = SystemClock.elapsedRealtime()
+
+        // Phone calls (including WhatsApp/VoIP) and the emergency pause always win.
+        if (isInCall() || now < emergencyUntilMs) {
+            releaseStickyLock()
+            perform(engine.onScreenOff())
+            publish()
+            return
+        }
+
         // On the lock screen the user is not using the phone: never trigger the camera there.
+        val keyguardLocked = keyguardManager.isKeyguardLocked
         val orientation = SensorInput.toOrientation(
             values,
-            deviceLocked = keyguardManager.isKeyguardLocked,
+            deviceLocked = keyguardLocked,
             lyingElevationDeg = config.lyingElevationDeg,
         )
-        perform(engine.onPose(orientation, SystemClock.elapsedRealtime()))
+        perform(engine.onPose(orientation, now))
+        if (stickyLock && !keyguardLocked) updateStickyLock(orientation, now)
+        if (overlay.isShowing) overlay.update(orientation.screenElevationDeg, config.lyingElevationDeg)
         publish()
+    }
+
+    private fun updateStickyLock(orientation: Orientation, now: Long) {
+        when {
+            engine.phase == Phase.ALARMING -> stickyLock = false // the engine owns the lock again
+            orientation.pose != Pose.UNKNOWN && !config.isSuspicious(orientation.pose) -> releaseStickyLock()
+            engine.phase == Phase.COOLDOWN -> releaseStickyLock() // camera says: not lying
+            now - stickySinceMs >= config.maxLockMs -> releaseStickyLock() // safety cap
+        }
+    }
+
+    private fun releaseStickyLock() {
+        if (!stickyLock) return
+        stickyLock = false
+        if (engine.phase != Phase.ALARMING) overlay.hide()
+    }
+
+    private fun isInCall(): Boolean = when (audioManager.mode) {
+        AudioManager.MODE_RINGTONE, AudioManager.MODE_IN_CALL, AudioManager.MODE_IN_COMMUNICATION -> true
+        else -> false
+    }
+
+    private fun onEmergency() {
+        if (!started) return
+        emergencyUntilMs = SystemClock.elapsedRealtime() + EMERGENCY_PAUSE_MS
+        CommitmentStore.recordEmergency(this)
+        stickyLock = false
+        perform(engine.onScreenOff())
+        overlay.hide()
+        publish()
+        try {
+            startActivity(Intent(Intent.ACTION_DIAL).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not open the dialer", e)
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -201,11 +284,18 @@ class GuardService : LifecycleService(), SensorEventListener {
             Action.START_CAMERA_CHECK -> faceChecker.check(this) { face -> onFaceResult(face) }
             Action.CANCEL_CAMERA_CHECK -> faceChecker.cancel()
             Action.START_ALARM -> {
+                val locked = lockEnabled && overlay.show()
                 alarm.start()
+                // With the lock screen up, a short alarm is enough; without it, ring longer.
+                handler.removeCallbacks(stopSound)
+                handler.postDelayed(stopSound, if (locked) LOCKED_SOUND_MS else UNLOCKED_SOUND_MS)
                 updateNotification(getString(R.string.notif_alarm))
             }
             Action.STOP_ALARM -> {
+                handler.removeCallbacks(stopSound)
                 alarm.stop()
+                faceChecker.cancel() // a strict-mode re-check may still be running
+                if (!stickyLock) overlay.hide()
                 updateNotification(getString(R.string.notif_watching))
             }
         }
@@ -215,7 +305,7 @@ class GuardService : LifecycleService(), SensorEventListener {
         if (!started) return
         // A late result (after a watchdog timeout or screen-off) is ignored by the engine;
         // don't show it in the UI either.
-        if (engine.phase != Phase.CHECKING) return
+        if (engine.phase != Phase.CHECKING && !engine.lockRecheckInFlight) return
         perform(engine.onFaceResult(face, SystemClock.elapsedRealtime()))
         val lastCheck = LastCheck(
             atMillis = System.currentTimeMillis(),
@@ -272,7 +362,12 @@ class GuardService : LifecycleService(), SensorEventListener {
             .setContentText(text)
             .setOngoing(true)
             .setContentIntent(openApp)
-            .addAction(0, getString(R.string.action_stop), stop)
+            .apply {
+                // No "stop" shortcut while a commitment is running.
+                if (!CommitmentStore.isActive(this@GuardService)) {
+                    addAction(0, getString(R.string.action_stop), stop)
+                }
+            }
             .build()
     }
 
@@ -286,8 +381,11 @@ class GuardService : LifecycleService(), SensorEventListener {
             started = false // late callbacks (sensor, camera) become no-ops from here on
             unregisterSensors()
             unregisterReceiver(screenReceiver)
+            handler.removeCallbacks(stopSound)
             alarm.stop()
+            overlay.hide()
             faceChecker.release()
+            if (!CommitmentStore.isActive(this)) CommitmentStore.onGuardStoppedCleanly(this)
         }
         GuardStatusStore.update { it.copy(running = false, phase = Phase.WATCHING) }
         super.onDestroy()
@@ -302,6 +400,10 @@ class GuardService : LifecycleService(), SensorEventListener {
         private const val EXTRA_LYING_ELEVATION = "lying_elevation_deg"
         private const val EXTRA_STRICT = "strict_mode"
         private const val EXTRA_ALARM_URI = "alarm_uri"
+        private const val EXTRA_LOCK = "lock_screen"
+        private const val LOCKED_SOUND_MS = 8_000L
+        private const val UNLOCKED_SOUND_MS = 60_000L
+        private const val EMERGENCY_PAUSE_MS = 180_000L
         const val DEFAULT_DELAY_SEC = 20
 
         /** Must be called while the app is visible (Android's while-in-use camera rule). */
@@ -311,7 +413,13 @@ class GuardService : LifecycleService(), SensorEventListener {
                 .putExtra(EXTRA_LYING_ELEVATION, settings.lyingElevationDeg)
                 .putExtra(EXTRA_STRICT, settings.strictMode)
                 .putExtra(EXTRA_ALARM_URI, settings.alarmSoundUri)
-            ContextCompat.startForegroundService(context, intent)
+                .putExtra(EXTRA_LOCK, settings.lockScreen)
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: Exception) {
+                // e.g. ForegroundServiceStartNotAllowedException if the app isn't visible.
+                Log.w(TAG, "Could not start the guard", e)
+            }
         }
 
         fun stop(context: Context) {

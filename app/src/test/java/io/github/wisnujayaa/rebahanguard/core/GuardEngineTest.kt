@@ -64,7 +64,9 @@ class GuardConfigTest {
             { GuardConfig(releaseMs = -1) },
             { GuardConfig(cameraWindowMs = 0) },
             { GuardConfig(cameraWindowMs = 5_000, checkTimeoutMs = 5_000) },
-            { GuardConfig(maxAlarmMs = 0) },
+            { GuardConfig(maxLockMs = 0) },
+            { GuardConfig(relockWindowMs = -1) },
+            { GuardConfig(triggerDelayMs = 2_000, relockDelayMs = 3_000) },
             { GuardConfig(minFaceWidthRatio = 0f) },
             { GuardConfig(minFaceWidthRatio = 1.5f) },
             { GuardConfig(minFaceWidthRatio = Float.NaN) },
@@ -74,8 +76,8 @@ class GuardConfigTest {
             { GuardConfig(lyingElevationDeg = Float.NaN) },
             { GuardConfig(lyingElevationDeg = -61f) },
             { GuardConfig(lyingElevationDeg = 31f) },
-            { GuardConfig(strictAlarmBurstMs = 0) },
-            { GuardConfig(maxAlarmMs = 10_000, strictAlarmBurstMs = 20_000) },
+            { GuardConfig(lockRecheckMs = 0) },
+            { GuardConfig(maxLockMs = 10_000, lockRecheckMs = 20_000) },
         )
         for (make in bad) {
             assertThrows(IllegalArgumentException::class.java) { make() }
@@ -90,7 +92,9 @@ class GuardEngineTest {
         releaseMs = 1_500,
         cameraWindowMs = 3_000,
         checkTimeoutMs = 10_000,
-        maxAlarmMs = 60_000,
+        maxLockMs = 300_000,
+        relockWindowMs = 600_000,
+        relockDelayMs = 3_000,
     )
     private val lyingFace = FaceObservation(0.4f, 5f)
 
@@ -182,12 +186,76 @@ class GuardEngineTest {
     }
 
     @Test
-    fun alarm_neverRingsLongerThanTheLimit() {
+    fun lock_staysUntilTheUserSitsUp_evenForMinutes() {
+        val e = GuardEngine(config)
+        e.triggerCheck(Pose.FACE_DOWN, 0)
+        assertEquals(Action.START_ALARM, e.onFaceResult(lyingFace, 10_000))
+        var t = 10_000L
+        while (t < 200_000) { // still lying 3 minutes later: still locked
+            assertEquals(Action.NONE, e.onPose(Pose.FACE_DOWN, t))
+            t += 1_000
+        }
+        assertEquals(Phase.ALARMING, e.phase)
+        e.onPose(Pose.UPRIGHT, 200_000)
+        assertEquals(Action.STOP_ALARM, e.onPose(Pose.UPRIGHT, 201_500))
+    }
+
+    @Test
+    fun lock_neverLastsLongerThanTheSafetyCap() {
         val e = GuardEngine(config)
         e.triggerCheck(Pose.FACE_DOWN, 0)
         e.onFaceResult(lyingFace, 10_000)
-        assertEquals(Action.NONE, e.onPose(Pose.FACE_DOWN, 69_999))
-        assertEquals(Action.STOP_ALARM, e.onPose(Pose.FACE_DOWN, 70_000))
+        assertEquals(Action.NONE, e.onPose(Pose.FACE_DOWN, 309_999))
+        assertEquals(Action.STOP_ALARM, e.onPose(Pose.FACE_DOWN, 310_000))
+        assertEquals(Phase.COOLDOWN, e.phase)
+    }
+
+    @Test
+    fun briefWobble_doesNotUnlock() {
+        val e = GuardEngine(config)
+        e.triggerCheck(Pose.FACE_DOWN, 0)
+        e.onFaceResult(lyingFace, 10_000)
+        e.onPose(Pose.UPRIGHT, 11_000) // phone tilted up for a moment...
+        e.onPose(Pose.FACE_DOWN, 12_000) // ...and back: not sitting up
+        assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, 12_600))
+        assertEquals(Phase.ALARMING, e.phase)
+    }
+
+    // ------------------------------------------------------------ relock (anti-escape)
+
+    @Test
+    fun screenOffAndOnAgain_afterBeingCaught_relocksQuickly() {
+        val e = GuardEngine(config)
+        e.triggerCheck(Pose.FACE_DOWN, 0)
+        e.onFaceResult(lyingFace, 10_000)
+        assertEquals(Action.STOP_ALARM, e.onScreenOff()) // the "escape"
+        e.onPose(Pose.FACE_DOWN, 20_000) // screen on again, still lying
+        assertEquals(Action.NONE, e.onPose(Pose.FACE_DOWN, 22_999))
+        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.FACE_DOWN, 23_000)) // 3 s, not 10 s
+        assertEquals(Action.START_ALARM, e.onFaceResult(lyingFace, 23_500))
+    }
+
+    @Test
+    fun relockWindow_expires() {
+        val e = GuardEngine(config)
+        e.triggerCheck(Pose.FACE_DOWN, 0)
+        e.onFaceResult(lyingFace, 10_000)
+        e.onScreenOff()
+        val later = 10_000L + 600_000
+        e.onPose(Pose.FACE_DOWN, later)
+        assertEquals(Action.NONE, e.onPose(Pose.FACE_DOWN, later + 3_000))
+        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.FACE_DOWN, later + 10_000))
+    }
+
+    @Test
+    fun relock_stillNeedsTheCamera_neverLocksOnGravityAlone() {
+        val e = GuardEngine(config)
+        e.triggerCheck(Pose.FACE_DOWN, 0)
+        e.onFaceResult(lyingFace, 10_000)
+        e.onScreenOff()
+        e.onPose(Pose.FACE_DOWN, 20_000)
+        e.onPose(Pose.FACE_DOWN, 23_000)
+        assertEquals(Action.NONE, e.onFaceResult(null, 23_500)) // no face: no lock
         assertEquals(Phase.COOLDOWN, e.phase)
     }
 
@@ -274,7 +342,9 @@ class GuardEngineTest {
 
     // ------------------------------------------------------------ strict mode
 
-    private val strict = config.copy(strictMode = true, strictAlarmBurstMs = 5_000)
+    private val strict = config.copy(strictMode = true, lockRecheckMs = 5_000)
+    private val sidewaysHead = FaceObservation(0.4f, 88f) // phone upright, face rotated → head sideways
+    private val uprightHead = FaceObservation(0.4f, 3f)
 
     @Test
     fun normalMode_uprightPhone_neverChecks() {
@@ -287,29 +357,39 @@ class GuardEngineTest {
     }
 
     @Test
-    fun strictMode_lyingOnSideWithUprightPhone_ringsInBurstsUntilHeadIsUpright() {
+    fun strictMode_staysLocked_whileCameraStillSeesALyingHead() {
         val e = GuardEngine(strict)
-        val sidewaysHead = FaceObservation(0.4f, 88f) // phone upright, face rotated → head sideways
-        val uprightHead = FaceObservation(0.4f, 3f)
-
         e.triggerCheck(Pose.UPRIGHT, 0)
         assertEquals(Action.START_ALARM, e.onFaceResult(sidewaysHead, 10_300))
 
-        // Gravity can't see the user sit up (phone stays upright), so: burst, then re-check.
+        // Gravity can't see the user sit up (phone stays upright): the camera re-checks while
+        // the phone stays locked.
         assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, 15_299))
-        assertEquals(Action.STOP_ALARM, e.onPose(Pose.UPRIGHT, 15_300))
-        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 15_500)) // no 10 s delay
-        assertEquals(Action.START_ALARM, e.onFaceResult(sidewaysHead, 16_000)) // still lying
+        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 15_300))
+        assertTrue(e.lockRecheckInFlight)
+        assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, 15_600)) // no double start
+        assertEquals(Action.NONE, e.onFaceResult(sidewaysHead, 16_000)) // still lying: stay locked
+        assertEquals(Phase.ALARMING, e.phase)
 
-        assertEquals(Action.STOP_ALARM, e.onPose(Pose.UPRIGHT, 21_000))
-        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 21_200))
-        assertEquals(Action.NONE, e.onFaceResult(uprightHead, 21_700)) // sat up
+        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 21_000))
+        assertEquals(Action.STOP_ALARM, e.onFaceResult(uprightHead, 21_500)) // sat up
         assertEquals(Phase.COOLDOWN, e.phase)
     }
 
     @Test
-    fun strictMode_baseAlarm_stopsAsSoonAsUserSitsUp() {
-        // Alarm caught with the screen facing down; sitting up makes the phone UPRIGHT, which is
+    fun strictMode_recheckWatchdog_keepsTheLockAndTriesAgain() {
+        val e = GuardEngine(strict)
+        e.triggerCheck(Pose.UPRIGHT, 0)
+        e.onFaceResult(sidewaysHead, 10_300)
+        e.onPose(Pose.UPRIGHT, 15_300) // recheck starts
+        assertEquals(Action.CANCEL_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 25_300)) // never answered
+        assertEquals(Phase.ALARMING, e.phase)
+        assertEquals(Action.START_CAMERA_CHECK, e.onPose(Pose.UPRIGHT, 30_300))
+    }
+
+    @Test
+    fun strictMode_baseLock_unlocksAsSoonAsUserSitsUp() {
+        // Caught with the screen facing down; sitting up makes the phone UPRIGHT, which is
         // "suspicious" in strict mode — but it must still count as having sat up.
         val e = GuardEngine(strict)
         e.triggerCheck(Pose.FACE_DOWN, 0)
@@ -319,22 +399,23 @@ class GuardEngineTest {
     }
 
     @Test
-    fun strictMode_recheckIsSkippedIfUserAlreadyPutThePhoneDownFlat() {
+    fun strictMode_puttingThePhoneDownFlat_unlocks() {
         val e = GuardEngine(strict)
         e.triggerCheck(Pose.UPRIGHT, 0)
-        e.onFaceResult(FaceObservation(0.4f, 88f), 10_300)
-        e.onPose(Pose.UPRIGHT, 15_300) // burst over
-        assertEquals(Action.NONE, e.onPose(Pose.FACE_UP, 15_500))
+        e.onFaceResult(sidewaysHead, 10_300)
+        e.onPose(Pose.FACE_UP, 11_000)
+        assertEquals(Action.STOP_ALARM, e.onPose(Pose.FACE_UP, 12_500))
         assertEquals(Phase.WATCHING, e.phase)
     }
 
     @Test
-    fun strictMode_screenOffDuringBurst_cancelsTheImmediateRecheck() {
+    fun strictMode_screenOffDuringRecheck_cancelsEverything() {
         val e = GuardEngine(strict)
         e.triggerCheck(Pose.UPRIGHT, 0)
-        e.onFaceResult(FaceObservation(0.4f, 88f), 10_300)
-        e.onPose(Pose.UPRIGHT, 15_300)
-        e.onScreenOff()
-        assertEquals(Action.NONE, e.onPose(Pose.UPRIGHT, 15_500)) // normal delay applies again
+        e.onFaceResult(sidewaysHead, 10_300)
+        e.onPose(Pose.UPRIGHT, 15_300) // recheck in flight
+        assertEquals(Action.STOP_ALARM, e.onScreenOff())
+        assertEquals(false, e.lockRecheckInFlight)
+        assertEquals(Action.NONE, e.onFaceResult(sidewaysHead, 15_800)) // late result ignored
     }
 }

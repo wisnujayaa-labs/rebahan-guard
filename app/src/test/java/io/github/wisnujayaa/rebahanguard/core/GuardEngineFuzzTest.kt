@@ -22,7 +22,10 @@ class GuardEngineFuzzTest {
         releaseMs = 1_500,
         cameraWindowMs = 3_000,
         checkTimeoutMs = 10_000,
-        maxAlarmMs = 30_000,
+        maxLockMs = 30_000,
+        lockRecheckMs = 5_000,
+        relockWindowMs = 60_000,
+        relockDelayMs = 2_000,
     )
     private val strictConfig = config.copy(strictMode = true)
 
@@ -99,7 +102,7 @@ class GuardEngineFuzzTest {
 
             if (!clockCanGoBackwards) {
                 // Nothing may stay on longer than its limit (checked at every sensor event).
-                if (alarmOn) check(now - alarmSince < config.maxAlarmMs, "alarm rang too long")
+                if (alarmOn) check(now - alarmSince < config.maxLockMs, "locked too long")
                 if (cameraOn) check(now - cameraSince < config.checkTimeoutMs, "camera stuck on")
             }
         }
@@ -129,12 +132,17 @@ class GuardEngineFuzzTest {
             }
 
             cameraOn = false // the camera check is finished once it reports
+            val wasLocked = alarmOn
             val action = engine.onFaceResult(face, now)
             apply(action, fromFaceResult = true, face = face)
             check(
                 engine.phase == Phase.ALARMING || engine.phase == Phase.COOLDOWN,
                 "a finished check must end in ALARMING or COOLDOWN",
             )
+            if (wasLocked && engine.phase == Phase.COOLDOWN) {
+                // A lock re-check may only unlock when the camera no longer sees a lying head.
+                check(!LyingJudge.isLying(engine.lastOrientation, face, config), "unlocked while lying")
+            }
         }
 
         private fun screenOffEvent() {
@@ -149,7 +157,8 @@ class GuardEngineFuzzTest {
                 Action.NONE -> Unit
                 Action.START_CAMERA_CHECK -> {
                     check(!cameraOn, "camera started twice")
-                    check(!alarmOn, "camera started while the alarm rings")
+                    // While locked, only a strict-mode lock may re-check with the camera.
+                    if (alarmOn) check(engine.lockRecheckInFlight, "camera started while locked")
                     cameraOn = true
                     cameraSince = now
                     stats.checks++
@@ -170,12 +179,15 @@ class GuardEngineFuzzTest {
                 Action.STOP_ALARM -> {
                     check(alarmOn, "stopped an alarm that was not ringing")
                     alarmOn = false
+                    cameraOn = false // STOP_ALARM also cancels any in-flight re-check
                 }
             }
         }
 
         private fun checkHardwareMatchesPhase() {
-            check(cameraOn == (engine.phase == Phase.CHECKING), "camera state != phase")
+            val cameraExpected = engine.phase == Phase.CHECKING ||
+                (engine.phase == Phase.ALARMING && engine.lockRecheckInFlight)
+            check(cameraOn == cameraExpected, "camera state != phase")
             check(alarmOn == (engine.phase == Phase.ALARMING), "alarm state != phase")
         }
     }

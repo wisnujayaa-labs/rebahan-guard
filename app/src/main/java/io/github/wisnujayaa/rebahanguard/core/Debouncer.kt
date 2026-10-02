@@ -14,7 +14,11 @@ class Debouncer(private val holdMs: Long) {
     private var trueSince: Long? = null
 
     /** Returns true once [condition] has been continuously true for at least [holdMs]. */
-    fun update(condition: Boolean, nowMs: Long): Boolean {
+    fun update(condition: Boolean, nowMs: Long): Boolean = update(condition, nowMs, holdMs)
+
+    /** Same, with a hold time chosen per call (e.g. shorter right after being caught). */
+    fun update(condition: Boolean, nowMs: Long, holdMs: Long): Boolean {
+        require(holdMs >= 0) { "holdMs must be >= 0, was $holdMs" }
         if (!condition) {
             trueSince = null
             return false
