@@ -5,4 +5,6 @@
     <string name="notif_watching">Mengawasi posisi HP-mu</string>
     <string name="notif_alarm">Ketahuan main HP sambil rebahan! Duduk dulu.</string>
     <string name="action_stop">Matikan</string>
+    <string name="strict_mode_description">Mode ketat Rebahan Guard. Dipakai untuk dua hal saja: mengetahui aplikasi mana yang sedang dibuka agar mode fokus bereaksi seketika, dan menutup halaman yang bisa mematikan penjaga (Info aplikasi, copot pemasangan, halaman Aksesibilitas aplikasi ini) selama waktu terlindungi. Isi layar aplikasi lain tidak dibaca atau disimpan.</string>
+    <string name="notif_channel_sessions">Sesi dan jam target</string>
 </resources>

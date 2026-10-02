@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.wisnujayaa.rebahanguard"
         minSdk = 29
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.5.0"
+        versionCode = 8
+        versionName = "1.8.0"
     }
 
     signingConfigs {
@@ -83,6 +83,8 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.mlkit.face.detection)
+    implementation(libs.mlkit.text.recognition)
+    implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)
 
     testImplementation(libs.junit)

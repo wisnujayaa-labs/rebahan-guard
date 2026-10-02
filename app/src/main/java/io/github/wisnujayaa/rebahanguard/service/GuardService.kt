@@ -48,6 +48,9 @@ import io.github.wisnujayaa.rebahanguard.core.Plan
 import io.github.wisnujayaa.rebahanguard.core.StillnessMeter
 import io.github.wisnujayaa.rebahanguard.core.TamperPenalty
 import io.github.wisnujayaa.rebahanguard.core.TypedPhrase
+import io.github.wisnujayaa.rebahanguard.core.DreamRules
+import io.github.wisnujayaa.rebahanguard.core.FocusRules
+import io.github.wisnujayaa.rebahanguard.core.Proof
 
 /**
  * Foreground service (type = camera) that glues the hardware to [GuardEngine]:
@@ -152,6 +155,19 @@ class GuardService : LifecycleService(), SensorEventListener {
     private var messageIndex = 0L
 
     private lateinit var powerManager: PowerManager
+    private lateinit var sessions: SessionRunner
+    private lateinit var blocker: AppBlocker
+    private var stepSensor: Sensor? = null
+    private var stepRegistered = false
+    private var lastNagMs = HashMap<Long, Long>()
+    private var strictWasOn = false
+    private val minuteTick = object : Runnable {
+        override fun run() {
+            if (!started) return
+            onMinute()
+            handler.postDelayed(this, 60_000)
+        }
+    }
     private var gravitySensor: Sensor? = null
     private var proximitySensor: Sensor? = null
     private var rawAccelSensor: Sensor? = null
@@ -172,8 +188,9 @@ class GuardService : LifecycleService(), SensorEventListener {
                     GuardStatusStore.update { it.copy(screenOn = true) }
                 }
                 Intent.ACTION_SCREEN_OFF -> {
-                    // Saves battery: nothing to guard while the screen is off.
-                    unregisterSensors()
+                    // Saves battery: nothing to guard while the screen is off — except during a
+                    // desk session, where the camera checks need the phone's orientation.
+                    if (!sessions.needsSensorsWithScreenOff) unregisterSensors()
                     val wasLocked = engine.phase == Phase.ALARMING
                     if (wasLocked && overlay.isShowing) {
                         stickyLock = true
@@ -194,12 +211,19 @@ class GuardService : LifecycleService(), SensorEventListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
 
+        if (!started && intent?.action == ACTION_STOP_SESSION) {
+            stopSelf() // nothing running, nothing to stop
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             // While protected (commitment, partner, schedule) the only way out is inside the app.
             if (!Protection.isProtected(this)) stopSelf()
             return START_NOT_STICKY
         }
-        if (started) return START_NOT_STICKY
+        if (started) {
+            handleSessionIntent(intent)
+            return START_NOT_STICKY
+        }
 
         if (!enterForeground()) {
             stopSelf()
@@ -259,8 +283,26 @@ class GuardService : LifecycleService(), SensorEventListener {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
 
+        sessions = SessionRunner(
+            context = this,
+            owner = this,
+            config = config,
+            faceChecker = faceChecker,
+            alarm = alarm,
+            orientation = { engine.lastOrientation },
+            screenOn = { powerManager.isInteractive },
+            notify = ::notifySession,
+            onAlarm = ::startVolumeWatch,
+        )
+        blocker = AppBlocker(this, focusReason = ::focusReason)
+        blocker.start()
+        stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+        strictWasOn = FocusStore.isStrictEnabled(this)
+        handler.postDelayed(minuteTick, 60_000)
+
         val screenOn = powerManager.isInteractive
         if (screenOn) registerSensors()
+        handleSessionIntent(intent)
         GuardStatusStore.update { it.copy(running = true, screenOn = screenOn, phase = Phase.WATCHING) }
 
         // NOT_STICKY on purpose: Android forbids (re)starting a camera foreground service from
@@ -276,7 +318,10 @@ class GuardService : LifecycleService(), SensorEventListener {
             // The "camera" service type only exists from Android 11 (API 30). On Android 10,
             // passing an unknown type would make startForeground() throw.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                // Location too when allowed, for "Tempat" sessions (Android 14 requires the type).
+                val location = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or (if (location) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0)
             } else {
                 0
             },
@@ -313,6 +358,10 @@ class GuardService : LifecycleService(), SensorEventListener {
         when (event.sensor.type) {
             Sensor.TYPE_PROXIMITY -> {
                 proximityNear = DeskRest.isNear(event.values.getOrElse(0) { Float.NaN }, event.sensor.maximumRange)
+                return
+            }
+            Sensor.TYPE_STEP_COUNTER -> {
+                event.values.getOrNull(0)?.let { sessions.onStepCounter(it) }
                 return
             }
             Sensor.TYPE_ACCELEROMETER -> {
@@ -413,10 +462,116 @@ class GuardService : LifecycleService(), SensorEventListener {
         publish()
     }
 
+    /** A pressing deadline first; otherwise the habit that is behind, in the user's own words. */
     private fun lockMessage(): String {
         val now = System.currentTimeMillis()
         val urgent = Plan.mostUrgent(PlanStore.load(this), now)
-        return urgent?.let { Plan.lockMessage(it, now) } ?: LockMessages.pick(messageIndex++)
+        lockQuote = null
+        if (urgent != null) return Plan.lockMessage(urgent, now)
+        val copy = DreamRules.lockCopy(DreamStore.load(this), DreamStore.today(), Protection.minuteOfDay(), messageIndex++)
+        if (copy != null) {
+            lockQuote = copy.quote
+            return copy.body
+        }
+        return LockMessages.pick(messageIndex++)
+    }
+
+    private var lockQuote: String? = null
+
+    // ---------------------------------------------------------------- sessions & focus
+
+    private fun handleSessionIntent(intent: Intent?) {
+        when (intent?.action) {
+            ACTION_START_SESSION -> {
+                val habit = DreamStore.load(this).habit(intent.getLongExtra(EXTRA_HABIT, -1)) ?: return
+                sessions.start(habit, intent.getIntExtra(EXTRA_MINUTES, 25))
+                if (habit.proof == Proof.MOVE) registerSteps()
+                if (habit.proof == Proof.DESK) registerSensors()
+                updateNotification("Sesi berjalan: ${habit.title}")
+            }
+            ACTION_STOP_SESSION -> {
+                sessions.stop()
+                unregisterSteps()
+                if (!powerManager.isInteractive) unregisterSensors()
+                updateNotification(getString(R.string.notif_watching))
+            }
+        }
+    }
+
+    private fun registerSteps() {
+        val sensor = stepSensor ?: return
+        if (stepRegistered) return
+        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACTIVITY_RECOGNITION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notifySession("Izinkan \"Aktivitas fisik\" agar langkah bisa dihitung.")
+            return
+        }
+        stepRegistered = sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+    }
+
+    private fun unregisterSteps() {
+        val sensor = stepSensor ?: return
+        if (!stepRegistered) return
+        sensorManager.unregisterListener(this, sensor)
+        stepRegistered = false
+    }
+
+    /** Why focus mode is on right now (shown on the block screen), or null. */
+    private fun focusReason(): String? {
+        if (isInCall() || SystemClock.elapsedRealtime() < emergencyUntilMs) return null
+        if (sessions.isRunning) return "sesi berjalan"
+        val book = DreamStore.load(this)
+        val minute = Protection.minuteOfDay()
+        val inWindow = DreamRules.behindToday(book, DreamStore.today(), minute).any { DreamRules.inWindow(it, minute) }
+        if (inWindow) return "jam target"
+        val now = System.currentTimeMillis()
+        val urgent = Plan.mostUrgent(PlanStore.load(this), now)?.dueWallMs?.let { it - now <= FOCUS_DEADLINE_MS } == true
+        val scheduleOn = schedule.enabled && schedule.isWithin(minute)
+        return when {
+            urgent -> "deadline dekat"
+            scheduleOn -> "jadwal jaga"
+            else -> null
+        }.takeIf { FocusRules.isFocusTime(false, inWindow, urgent, scheduleOn) }
+    }
+
+    /** Once a minute: habit-window reminders, and strict mode switched off during protection. */
+    private fun onMinute() {
+        val strictOn = FocusStore.isStrictEnabled(this)
+        if (strictWasOn && !strictOn && Protection.isProtected(this)) CommitmentStore.recordClockChange(this)
+        strictWasOn = strictOn
+        if (sessions.isRunning) return
+        val now = SystemClock.elapsedRealtime()
+        val minute = Protection.minuteOfDay()
+        for (h in DreamRules.behindToday(DreamStore.load(this), DreamStore.today(), minute)) {
+            if (!DreamRules.inWindow(h, minute) || h.proof == Proof.HONEST || h.proof == Proof.PHOTO) continue
+            if (now - (lastNagMs[h.id] ?: 0L) < NAG_EVERY_MS) continue
+            lastNagMs[h.id] = now
+            notifySession("Jam target \u201C${h.title}\u201D sudah mulai. Buka Rebahan Guard dan mulai sesinya.")
+        }
+    }
+
+    private fun notifySession(text: String) {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (manager.getNotificationChannel(SESSION_CHANNEL_ID) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(SESSION_CHANNEL_ID, getString(R.string.notif_channel_sessions), NotificationManager.IMPORTANCE_DEFAULT)
+            )
+        }
+        val openApp = PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val n = NotificationCompat.Builder(this, SESSION_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_guard)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openApp)
+            .setAutoCancel(true)
+            .build()
+        try {
+            manager.notify(SESSION_NOTIFICATION_ID, n)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Notifications not allowed", e)
+        }
     }
 
     private fun markGuardedTonight() {
@@ -513,6 +668,7 @@ class GuardService : LifecycleService(), SensorEventListener {
         warningUntilMs = 0
         overlay.hideWarning()
         overlay.show(lockMessage())
+        overlay.setQuote(lockQuote)
         alarm.start(vibrateAtMax = TamperPenalty.startsAtMaxVibration(StatsStore.tampersTonight(this)))
         startVolumeWatch()
         handler.removeCallbacks(stopSound)
@@ -614,6 +770,11 @@ class GuardService : LifecycleService(), SensorEventListener {
             handler.removeCallbacks(warningTick)
             handler.removeCallbacks(penaltyTick)
             handler.removeCallbacks(volumeWatch)
+            handler.removeCallbacks(minuteTick)
+            sessions.stop(silent = true)
+            sessions.release()
+            blocker.stop()
+            unregisterSteps()
             alarm.stop()
             overlay.hideAll()
             faceChecker.release()
@@ -640,11 +801,20 @@ class GuardService : LifecycleService(), SensorEventListener {
         private const val VOLUME_CHECK_MS = 400L
         private const val TAMPER_DEBOUNCE_MS = 3_000L
         private const val MAX_PENALTY_MS = 30 * 60_000L
+        private const val ACTION_START_SESSION = "io.github.wisnujayaa.rebahanguard.START_SESSION"
+        private const val ACTION_STOP_SESSION = "io.github.wisnujayaa.rebahanguard.STOP_SESSION"
+        private const val EXTRA_HABIT = "habit_id"
+        private const val EXTRA_MINUTES = "minutes"
+        private const val SESSION_CHANNEL_ID = "sessions"
+        private const val SESSION_NOTIFICATION_ID = 2
+        private const val NAG_EVERY_MS = 20 * 60_000L
+        private const val FOCUS_DEADLINE_MS = 6 * 3_600_000L
         const val DEFAULT_DELAY_SEC = 20
 
         /** Must be called while the app is visible (Android's while-in-use camera rule). */
-        fun start(context: Context, settings: GuardSettings) {
+        fun start(context: Context, settings: GuardSettings, extra: Intent? = null) {
             val intent = Intent(context, GuardService::class.java)
+                .apply { if (extra != null) { action = extra.action; extra.extras?.let { putExtras(it) } } }
                 .putExtra(EXTRA_DELAY_SEC, settings.delaySec)
                 .putExtra(EXTRA_LYING_ELEVATION, settings.lyingElevationDeg)
                 .putExtra(EXTRA_STRICT, settings.strictMode)
@@ -655,6 +825,19 @@ class GuardService : LifecycleService(), SensorEventListener {
             } catch (e: Exception) {
                 // e.g. ForegroundServiceStartNotAllowedException if the app isn't visible.
                 Log.w(TAG, "Could not start the guard", e)
+            }
+        }
+
+        /** Starts (or joins) the guard with a session for [habitId]. Call while the app is visible. */
+        fun startSession(context: Context, settings: GuardSettings, habitId: Long, minutes: Int) {
+            start(context, settings, Intent().setAction(ACTION_START_SESSION).putExtra(EXTRA_HABIT, habitId).putExtra(EXTRA_MINUTES, minutes))
+        }
+
+        fun stopSession(context: Context) {
+            try {
+                context.startService(Intent(context, GuardService::class.java).setAction(ACTION_STOP_SESSION))
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not stop the session", e)
             }
         }
 

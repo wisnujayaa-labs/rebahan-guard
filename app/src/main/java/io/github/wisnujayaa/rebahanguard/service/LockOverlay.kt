@@ -101,6 +101,17 @@ class LockOverlay(
         hidePhrase()
     }
 
+    /** The user's own words about why their dream matters, under the message. Null hides it. */
+    fun setQuote(quote: String?) {
+        val q = quoteText ?: return
+        if (quote.isNullOrBlank()) {
+            q.visibility = View.GONE
+        } else {
+            q.text = "\u201C$quote\u201D\n— kamu sendiri"
+            q.visibility = View.VISIBLE
+        }
+    }
+
     /** The volume was turned down: say what it cost. */
     fun showTamper(attempts: Int, extraMinutes: Int, needsPhrase: Boolean) {
         kickerText?.text = "Terkunci · mengecilkan volume: ${attempts}×"

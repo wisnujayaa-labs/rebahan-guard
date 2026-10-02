@@ -8,6 +8,7 @@ lifecycle = "2.8.7"
 coroutines = "1.9.0"
 camerax = "1.4.1"
 playServicesMlkitFace = "17.1.0"
+playServicesMlkitText = "19.0.1"
 junit = "4.13.2"
 zxing = "3.5.3"
 robolectric = "4.14.1"
@@ -27,6 +28,8 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 androidx-camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "camerax" }
 androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
+mlkit-text-recognition = { group = "com.google.android.gms", name = "play-services-mlkit-text-recognition", version.ref = "playServicesMlkitText" }
 mlkit-face-detection = { group = "com.google.android.gms", name = "play-services-mlkit-face-detection", version.ref = "playServicesMlkitFace" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }

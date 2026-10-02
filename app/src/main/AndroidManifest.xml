@@ -25,6 +25,25 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Ask to be exempt from battery optimisation, so the guard isn't killed at night. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Focus mode: see which app is in front (granted by the user in Settings › Usage access). -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!-- "Gerak" habits: the step counter. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <!-- "Tempat" habits: GPS and nearby Wi-Fi access points, only during a session. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <!-- List launchable apps for the focus-mode picker (instead of QUERY_ALL_PACKAGES). -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <!-- ML Kit's telemetry library would add these. Removing them means this app itself has no
          network access, so camera frames can never be sent out. (The face model runs inside
@@ -47,7 +66,7 @@
              camera check doesn't fail because the model is still missing. -->
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="face" />
+            android:value="face,ocr" />
 
         <activity
             android:name=".MainActivity"
@@ -71,6 +90,20 @@
         <service
             android:name=".service.GuardService"
             android:exported="false"
-            android:foregroundServiceType="camera" />
+            android:foregroundServiceType="camera|location" />
+
+        <!-- Strict mode (optional, user-enabled in Settings › Accessibility). -->
+        <service
+            android:name=".service.StrictModeService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/strict_mode_service" />
+        </service>
     </application>
 </manifest>
