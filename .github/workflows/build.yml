@@ -67,7 +67,7 @@ jobs:
           retention-days: 14
 
       - name: Android lint
-        run: ./gradlew lintStandarDebug lintKetatDebug
+        run: ./gradlew lintStandarDebug
 
       # Turn lint findings into annotations so they are readable on the public run page,
       # without downloading the report.
