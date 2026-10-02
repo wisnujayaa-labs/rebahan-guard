@@ -37,43 +37,6 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
-/**
- * The "Impian" tab. In this version it holds the record of the guard — streak, the week, the
- * camera history — and a promise of where dreams will live (v1.6).
- */
-@Composable
-fun DreamsTab(refreshKey: Any?, checks: List<LastCheck>) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        Text("Impian", style = MaterialTheme.typography.headlineLarge)
-        Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
-            AccentRule(Tone.Lamp, Modifier.fillMaxHeight())
-            Column(Modifier.padding(start = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    "Tulis apa yang ingin kamu capai, dan kenapa itu penting bagimu.",
-                    style = MaterialTheme.typography.titleLarge.copy(fontStyle = FontStyle.Italic),
-                )
-                Text(
-                    "Segera hadir: impian, target, dan kebiasaan, dengan kalimat komitmen yang kamu " +
-                        "tulis sendiri (atau pilih dari contoh) dan yang akan muncul di layar kunci.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Tone.Muted,
-                )
-            }
-        }
-        HorizontalDivider(color = Tone.Hairline)
-        Kicker("Jejakmu")
-        StatsSection(refreshKey)
-        CheckHistory(checks)
-        Spacer(Modifier.height(24.dp))
-    }
-}
-
 /** Streak, this week's numbers, and a report the user can send to their partner. */
 @Composable
 fun StatsSection(refreshKey: Any?) {

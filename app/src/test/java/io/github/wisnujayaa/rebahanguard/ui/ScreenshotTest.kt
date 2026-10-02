@@ -30,6 +30,13 @@ import io.github.wisnujayaa.rebahanguard.service.GuardSettings
 import io.github.wisnujayaa.rebahanguard.service.GuardStatus
 import io.github.wisnujayaa.rebahanguard.service.LastCheck
 import io.github.wisnujayaa.rebahanguard.service.PlanStore
+import io.github.wisnujayaa.rebahanguard.service.DreamStore
+import io.github.wisnujayaa.rebahanguard.core.Dream
+import io.github.wisnujayaa.rebahanguard.core.DreamBook
+import io.github.wisnujayaa.rebahanguard.core.DreamRules
+import io.github.wisnujayaa.rebahanguard.core.Habit
+import io.github.wisnujayaa.rebahanguard.core.HabitUnit
+import io.github.wisnujayaa.rebahanguard.core.Proof
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -65,6 +72,20 @@ class ScreenshotTest {
                 PlanItem(6, "Kuis PBP", PlanCategory.KULIAH, doneAtMs = now - hour, createdAtMs = 6),
             )
         }
+        val today = DreamStore.today()
+        DreamStore.update(context) {
+            var b = DreamBook(
+                dreams = listOf(Dream(1, "Kuliah S2 di luar negeri", "Aku ingin membuktikan pada diriku sendiri bahwa aku bisa lebih dari ini.", "IELTS 7.0 sebelum Mei 2027", createdDay = today - 10)),
+                habits = listOf(
+                    Habit(10, 1, "Latihan listening", HabitUnit.MINUTES, 30, windowStart = 19 * 60 + 30, windowEnd = 21 * 60, proof = Proof.DESK, createdDay = today - 10),
+                    Habit(11, 1, "Baca bab buku", HabitUnit.PAGES, 20, proof = Proof.PHOTO, createdDay = today - 10),
+                    Habit(12, 1, "Lari pagi", HabitUnit.STEPS, 3000, proof = Proof.MOVE, createdDay = today - 10),
+                ),
+            )
+            for (d in today - 4 until today) b = DreamRules.addProgress(b, 10, d, 30, 3)
+            b = DreamRules.addProgress(b, 10, today, 10, 3)
+            DreamRules.addProgress(b, 12, today, 3200, 3)
+        }
     }
 
     private fun shot(name: String, padded: Boolean = true, content: @Composable () -> Unit) {
@@ -84,6 +105,7 @@ class ScreenshotTest {
         TodayHeader(liveAngle = 38f, thresholdDeg = -5f)
         UrgentCallout(onOpenPlan = {})
         StatusLines(GuardStatus(running = true, phase = Phase.WATCHING, pose = Pose.UPRIGHT))
+        HabitsToday(onOpenDreams = {})
         ImportantToday(onOpenPlan = {})
         BottomNav(selected = Tab.TODAY, onSelect = {})
     }
@@ -108,7 +130,23 @@ class ScreenshotTest {
             atMillis = 0, faceWidthRatio = null, rollDeg = null, headTiltDeg = null, lying = false,
             report = CheckReport(CheckReason.TOO_DARK, frames = 12, meanLuma = 21f, usedRingLight = true),
         )
-        DreamsTab(refreshKey = 0, checks = listOf(check))
+        DreamsTab(refreshKey = 0, checks = listOf(check), onStartSession = { _, _ -> })
+    }
+
+    @Test
+    @Config(qualifiers = "+night")
+    fun dreams_night() = shot("dreams_night", padded = false) {
+        DreamsTab(refreshKey = 0, checks = emptyList(), onStartSession = { _, _ -> })
+    }
+
+    @Test
+    fun dream_editor() = shot("dream_editor") {
+        DreamEditor(initial = null, onSave = {}, onArchive = null, onCancel = {})
+    }
+
+    @Test
+    fun habit_editor() = shot("habit_editor") {
+        HabitEditor(dreamId = 1, initial = null, onSave = {}, onDelete = null, onCancel = {})
     }
 
     @Test

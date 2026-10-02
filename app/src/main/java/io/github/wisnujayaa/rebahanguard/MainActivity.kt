@@ -109,6 +109,16 @@ import io.github.wisnujayaa.rebahanguard.ui.Kicker
 import io.github.wisnujayaa.rebahanguard.ui.PlanRow
 import io.github.wisnujayaa.rebahanguard.ui.PlanTab
 import io.github.wisnujayaa.rebahanguard.ui.rememberNow
+import io.github.wisnujayaa.rebahanguard.ui.FocusSettings
+import io.github.wisnujayaa.rebahanguard.ui.HabitsToday
+import io.github.wisnujayaa.rebahanguard.ui.PlacesSettings
+import io.github.wisnujayaa.rebahanguard.ui.SessionPanel
+import io.github.wisnujayaa.rebahanguard.core.CommitmentTemplates
+import io.github.wisnujayaa.rebahanguard.core.Habit
+import io.github.wisnujayaa.rebahanguard.core.Proof
+import io.github.wisnujayaa.rebahanguard.core.TypedPhrase
+import io.github.wisnujayaa.rebahanguard.service.DreamStore
+import io.github.wisnujayaa.rebahanguard.service.SessionStore
 import io.github.wisnujayaa.rebahanguard.ui.Tone
 import io.github.wisnujayaa.rebahanguard.ui.PartnerCodeField
 import io.github.wisnujayaa.rebahanguard.ui.PartnerSection
@@ -236,6 +246,40 @@ private fun GuardScreen() {
         if (missing.isEmpty()) launchGuard(beginCommitment) else permissionLauncher.launch(missing.toTypedArray())
     }
 
+    // Sessions need the guard's permissions plus, depending on the proof, steps or location.
+    var pendingSession by remember { mutableStateOf<Pair<Habit, Int>?>(null) }
+    val sessionPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        val p = pendingSession ?: return@rememberLauncherForActivityResult
+        pendingSession = null
+        if (granted[Manifest.permission.CAMERA] == false) {
+            cameraDenied = true
+        } else if (overlayReady()) {
+            GuardService.startSession(context, settings, p.first.id, p.second)
+        } else {
+            needsOverlayPermission = true
+        }
+    }
+
+    fun startSession(habit: Habit, minutes: Int) {
+        val needed = requiredPermissions() + when (habit.proof) {
+            Proof.MOVE -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) listOf(Manifest.permission.ACTIVITY_RECOGNITION) else emptyList()
+            Proof.PLACE -> listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            else -> emptyList()
+        }
+        val missing = needed.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+        when {
+            missing.isNotEmpty() -> {
+                pendingSession = habit to minutes
+                sessionPermissionLauncher.launch(missing.toTypedArray())
+            }
+            !overlayReady() -> needsOverlayPermission = true
+            else -> GuardService.startSession(context, settings, habit.id, minutes)
+        }
+    }
+    val activeSession by SessionStore.session.collectAsState()
+
     // While protected, opening the app is enough to bring the guard back (after a restart, a
     // force stop or a battery saver).
     LaunchedEffect(status.running, committed, hasPartner, scheduleActive) {
@@ -259,6 +303,7 @@ private fun GuardScreen() {
             when (tab) {
                 Tab.TODAY -> TabColumn {
                     TodayHeader(liveAngle, settings.lyingElevationDeg)
+                    activeSession?.let { SessionPanel(it) }
                     UrgentCallout(onOpenPlan = { tab = Tab.PLAN })
 
                     StatusLines(status)
@@ -340,12 +385,13 @@ private fun GuardScreen() {
                         )
                     }
 
+                    HabitsToday(onOpenDreams = { tab = Tab.DREAMS })
                     ImportantToday(onOpenPlan = { tab = Tab.PLAN })
                 }
 
                 Tab.PLAN -> PlanTab()
 
-                Tab.DREAMS -> DreamsTab(statsRefresh, status.checks)
+                Tab.DREAMS -> DreamsTab(statsRefresh, status.checks, onStartSession = ::startSession)
 
                 Tab.SETTINGS -> TabColumn {
                     Text("Atur", style = MaterialTheme.typography.headlineLarge)
@@ -353,6 +399,10 @@ private fun GuardScreen() {
                     PartnerSection(editable = true, onChanged = { hasPartner = PartnerStore.hasPartner(context) })
                     Kicker("Penjaga")
                     SettingsPanel(settings, editable, committed, ::update)
+                    Kicker("Mode fokus")
+                    FocusSettings()
+                    Kicker("Tempat")
+                    PlacesSettings()
                     Kicker("Sudut layar sekarang")
                     ScreenAngleDial(
                         elevationDeg = liveAngle,
@@ -650,11 +700,15 @@ private fun EmergencyStopPanel(hasPartner: Boolean, onStopped: () -> Unit, onCan
         }
     }
 
+    val context = LocalContext.current
+    val phrase = remember {
+        TypedPhrase(CommitmentTemplates.emergencyPhrase(DreamStore.load(context).activeDreams.firstOrNull()?.title))
+    }
     val waitMs = EmergencyStopRules.waitMs(hasPartner)
     val waited = (now - startedAt).coerceAtLeast(0)
     val leftSec = ((waitMs - waited).coerceAtLeast(0) + 999) / 1000
-    val ready = EmergencyStop.canStop(waited, typed, hasPartner)
-    val correct = EmergencyStop.correctWords(typed)
+    val ready = waited >= waitMs && phrase.matches(typed)
+    val correct = phrase.correctWords(typed)
 
     Column(
         Modifier
@@ -678,13 +732,13 @@ private fun EmergencyStopPanel(hasPartner: Boolean, onStopped: () -> Unit, onCan
             color = Tone.Muted,
         )
         Text("Ketik pengakuan ini, kata demi kata:", style = MaterialTheme.typography.bodyMedium)
-        Text("\u201C${EmergencyStop.PHRASE}\u201D", style = MaterialTheme.typography.bodyLarge, color = Tone.Lamp)
+        Text("\u201C${phrase.text}\u201D", style = MaterialTheme.typography.bodyLarge, color = Tone.Lamp)
         OutlinedTextField(
             value = typed,
             onValueChange = { typed = it.take(400) },
             modifier = Modifier.fillMaxWidth(),
             minLines = 3,
-            supportingText = { Text("$correct dari ${EmergencyStop.wordCount} kata benar") },
+            supportingText = { Text("$correct dari ${phrase.wordCount} kata benar") },
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onStopped, enabled = ready, shape = CircleShape) { Text("Matikan penjaga") }
