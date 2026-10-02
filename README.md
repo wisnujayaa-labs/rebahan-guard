@@ -1,8 +1,12 @@
-# 🌙 Rebahan Guard
+# Rebahan Guard
 
-**An Android app that rings an alarm when you use your phone while lying in bed.**
+**An Android app that locks your phone when you use it lying in bed while there is work to do.**
 
-*Rebahan* is Indonesian for "lying around". Scrolling while lying down quietly eats into sleep, so this app catches it with **sensor fusion**: a cheap gravity sensor watches all the time, and the front camera only switches on for a few seconds to confirm.
+*Rebahan* is Indonesian for "lying around". Scrolling in bed quietly eats the hours meant for
+studying, assignments and personal goals. The app catches it with **sensor fusion** (a cheap
+gravity sensor watches all the time, the front camera switches on for a few seconds to
+confirm) and answers with a lock screen that names **what you are leaving behind**: "you're lying
+down, but *Laporan praktikum DDP2* is due in 4 h 12 m".
 
 [![Build APK](https://github.com/wisnujayaa-labs/rebahan-guard/actions/workflows/build.yml/badge.svg)](https://github.com/wisnujayaa-labs/rebahan-guard/actions/workflows/build.yml)
 ![Android](https://img.shields.io/badge/Android-10%2B-3DDC84?logo=android&logoColor=white)
@@ -81,12 +85,33 @@ frames are dark, the screen briefly turns full-brightness white to light the use
 check records *why* it ended (too dark, no face, face too small, model not ready…) so problems are
 measured, not guessed.
 
+### Plan: urgent ≠ important
+
+The **Rencana** tab splits work the way the Eisenhower matrix does: *urgent* (a deadline within
+24 h — the clock forces it), *important but not urgent* (nothing forces it, so it is the first
+thing traded for lying in bed) and *later*. The nearest deadline is what the lock screen talks
+about. Stored in app-private storage through `AtomicFile` (a crash mid-write keeps the previous
+version), with a versioned, fuzz-tested text codec.
+
+### Face down on a desk vs. held above your face
+
+To the gravity sensor these are identical (screen towards the floor). `DeskRest` separates them
+with two more signals: the **proximity sensor** (covered by the desk, but sees nothing ~25 cm
+above a face) and **stillness** (standard deviation of the raw acceleration over 3 s: a desk is
+still, a hand always trembles). Both must agree.
+
 ### Locking, warning, and the way out
 
 - First catch: a 10-second "sit up now" banner, then a full-screen lock above every app with a
   rotating reminder about studying. Repeat offences within 10 minutes lock immediately.
 - The lock lifts when the sensors see the user sitting up; it never lasts more than 5 minutes,
   phone calls are never blocked, and an emergency button always opens the dialer.
+- **The alarm can't be silenced.** It plays on the alarm stream (sounds in silent mode), the
+  stream is held at full volume while the alarm is active, the lock screen swallows the volume
+  keys, and vibration escalates every 10 s. Turning the volume down anyway is an *attempt*:
+  +5, +10, then +15 minutes of lock after sitting up (served only while the screen is on), the
+  third time also requires typing a commitment sentence, the streak breaks and the partner report
+  shows it.
 - **Trusted partner.** Switching the guard off is done by someone else:
   - **Authenticator (TOTP, RFC 6238)**: the partner scans a QR code with Google Authenticator.
     The secret is imported into the **Android Keystore as a non-exportable key**, the QR screen is
@@ -190,13 +215,15 @@ All decision logic is pure Kotlin, so it is tested on the JVM in well under a se
 - [ ] Very dark rooms can make face detection fail (screen light usually helps)
 - [ ] Instrumented (on-device) tests for the service and camera layer
 - [ ] Some OEM battery savers (Xiaomi, Oppo, vivo) may kill the service — whitelist the app
-- [ ] Schedule (only active at night), statistics of "caught" events
+- [ ] v1.6 — Dreams → goals → habits, with a commitment sentence (own words or templates) on the lock screen
+- [ ] v1.7 — Focus mode: block distracting apps (Usage Access), 2× "5 more minutes" per day
+- [ ] v1.8 — Strict mode (Accessibility), proof of habits by steps, place (GPS + Wi-Fi fingerprint) or photo
 - [ ] Learn the threshold from more than one feature (e.g. add head pitch) — a small logistic regression
 
 ## Releases
 
-Signed APKs are published on the [Releases page](../../releases). Pushing a tag such as `v1.4.0`
-runs `release.yml`, which decodes the release key from GitHub Secrets into a temporary file,
+Signed APKs are published on the [Releases page](../../releases). Running the **Release**
+workflow from the Actions tab (or pushing a tag such as `v1.5.0`) runs `release.yml`, which decodes the release key from GitHub Secrets into a temporary file,
 builds a non-debuggable, signed APK and attaches it to a GitHub Release. The release key never
 enters the repository.
 
@@ -209,7 +236,7 @@ enters the repository.
 
 1. Open the **Actions** tab → latest *Build APK* run → download **RebahanGuard-apk**.
 2. Unzip, copy the `.apk` to your phone, open it, allow "Install unknown apps".
-3. Open the app → set the delay → **Aktifkan penjaga** → grant camera + notifications.
+3. Open the app → **Nyalakan penjaga** → grant camera, notifications and "display over other apps".
 
 Local build (needs JDK 17 + Android SDK):
 
@@ -227,4 +254,5 @@ Kotlin · Jetpack Compose (Material 3) · CameraX · Google ML Kit Face Detectio
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). The bundled Fraunces typeface is © The Fraunces Project Authors,
+under the SIL Open Font License 1.1 ([licenses/Fraunces-OFL.txt](licenses/Fraunces-OFL.txt)).
