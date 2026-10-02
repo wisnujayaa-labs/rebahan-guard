@@ -279,6 +279,15 @@ All decision logic is pure Kotlin, so it is tested on the JVM in well under a se
 - [ ] Laptop as a witness: browser extension + HMAC-signed QR summary (no server)
 - [ ] Learn the threshold from more than one feature (e.g. add head pitch) — a small logistic regression
 
+## Two editions
+
+| APK | Strict mode (Accessibility) | Installs from a file manager |
+|---|---|---|
+| `RebahanGuard-vX.Y.Z.apk` (standar) | no | yes |
+| `RebahanGuard-vX.Y.Z-ketat.apk` | yes | usually **blocked** by Google Play Protect's fraud protection, which stops sideloaded apps asking for Accessibility, SMS or notification access; install it from a computer with `adb install` |
+
+Both share the same package and data, so switching editions is an update.
+
 ## Releases
 
 Signed APKs are published on the [Releases page](../../releases). Running the **Release**

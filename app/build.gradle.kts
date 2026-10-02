@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.wisnujayaa.rebahanguard"
         minSdk = 29
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.8.1"
+        versionCode = 10
+        versionName = "1.8.2"
     }
 
     signingConfigs {
@@ -37,6 +37,21 @@ android {
                 keyAlias = System.getenv("RELEASE_KEY_ALIAS")
                 keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
             }
+        }
+    }
+
+    // Two editions. "standar" has no Accessibility service, so Google Play Protect's fraud
+    // protection (which blocks sideloaded apps that ask for Accessibility, SMS or notification
+    // access) lets it install from a file manager. "ketat" adds strict mode for those who want it.
+    flavorDimensions += "edition"
+    productFlavors {
+        create("standar") {
+            dimension = "edition"
+            buildConfigField("boolean", "STRICT_MODE", "false")
+        }
+        create("ketat") {
+            dimension = "edition"
+            buildConfigField("boolean", "STRICT_MODE", "true")
         }
     }
 
@@ -65,6 +80,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

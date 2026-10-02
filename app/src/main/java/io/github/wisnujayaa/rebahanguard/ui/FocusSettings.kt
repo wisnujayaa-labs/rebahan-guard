@@ -102,12 +102,20 @@ fun FocusSettings() {
             okText = "Akses penggunaan diizinkan",
             todo = "Izinkan “Akses penggunaan” agar penjaga tahu aplikasi mana yang dibuka",
         ) { open(context, Settings.ACTION_USAGE_ACCESS_SETTINGS) }
-        Status(
-            ok = strict,
-            okText = "Mode ketat aktif: reaksi seketika, halaman Info aplikasi ditutup saat terlindungi",
-            todo = "Mode ketat (opsional): Aksesibilitas › Rebahan Guard. Untuk aplikasi dari luar Play Store, " +
-                "buka dulu Info aplikasi › ⋮ › “Izinkan setelan terbatas”",
-        ) { open(context, Settings.ACTION_ACCESSIBILITY_SETTINGS) }
+        if (io.github.wisnujayaa.rebahanguard.BuildConfig.STRICT_MODE) {
+            Status(
+                ok = strict,
+                okText = "Mode ketat aktif: reaksi seketika, halaman Info aplikasi ditutup saat terlindungi",
+                todo = "Mode ketat (opsional): Aksesibilitas › Rebahan Guard. Untuk aplikasi dari luar Play Store, " +
+                    "buka dulu Info aplikasi › ⋮ › “Izinkan setelan terbatas”",
+            ) { open(context, Settings.ACTION_ACCESSIBILITY_SETTINGS) }
+        } else {
+            Text(
+                "Edisi standar: tanpa mode ketat (Aksesibilitas), agar tidak diblokir Play Protect. " +
+                    "Mode fokus tetap bekerja lewat Akses penggunaan.",
+                style = MaterialTheme.typography.bodySmall, color = Tone.Muted,
+            )
+        }
         val attempts = FocusStore.attempts(context).on(today)
         val passes = FocusStore.passes(context).left(today)
         Text("Hari ini: mencoba membuka aplikasi pengalih $attempts kali · sisa jatah 5 menit: $passes",

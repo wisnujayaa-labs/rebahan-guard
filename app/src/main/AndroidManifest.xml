@@ -91,19 +91,5 @@
             android:name=".service.GuardService"
             android:exported="false"
             android:foregroundServiceType="camera|location" />
-
-        <!-- Strict mode (optional, user-enabled in Settings › Accessibility). -->
-        <service
-            android:name=".service.StrictModeService"
-            android:exported="false"
-            android:label="@string/app_name"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/strict_mode_service" />
-        </service>
     </application>
 </manifest>

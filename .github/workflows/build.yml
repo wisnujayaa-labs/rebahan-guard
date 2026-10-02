@@ -51,12 +51,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RebahanGuard-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/*/debug/*.apk
           retention-days: 30
 
       # Runs every unit test (logic, fuzz, Robolectric) and records the UI screenshots.
       - name: Unit tests + screenshots
-        run: ./gradlew recordRoborazziDebug
+        run: ./gradlew recordRoborazziStandarDebug
 
       - name: Upload screenshots
         if: always()
@@ -67,7 +67,7 @@ jobs:
           retention-days: 14
 
       - name: Android lint
-        run: ./gradlew lintDebug
+        run: ./gradlew lintStandarDebug lintKetatDebug
 
       # Turn lint findings into annotations so they are readable on the public run page,
       # without downloading the report.
@@ -76,7 +76,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob, xml.etree.ElementTree as ET
-          for path in glob.glob("app/build/reports/lint-results-debug.xml"):
+          for path in glob.glob("app/build/reports/lint-results-*.xml"):
               try:
                   root = ET.parse(path).getroot()
               except Exception as e:
@@ -121,7 +121,7 @@ jobs:
           name: reports
           path: |
             app/build/reports/tests/
-            app/build/reports/lint-results-debug.*
+            app/build/reports/lint-results-*
           retention-days: 14
 
   # Puts the latest screenshots on the `screenshots` branch so they can be viewed (and fetched)

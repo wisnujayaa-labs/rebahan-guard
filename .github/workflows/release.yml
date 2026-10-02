@@ -60,7 +60,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest
+        run: ./gradlew testStandarDebugUnitTest
 
       - name: Build signed release APK
         env:
@@ -70,15 +70,21 @@ jobs:
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: ./gradlew assembleRelease
 
-      - name: Name the APK after the version
-        run: cp app/build/outputs/apk/release/app-release.apk "RebahanGuard-${VERSION}.apk"
+      # Two editions: the standard one installs from a file manager without Play Protect
+      # blocking it; "ketat" adds strict mode (Accessibility), which Play Protect blocks there.
+      - name: Name the APKs after the version
+        run: |
+          cp app/build/outputs/apk/standar/release/app-standar-release.apk "RebahanGuard-${VERSION}.apk"
+          cp app/build/outputs/apk/ketat/release/app-ketat-release.apk "RebahanGuard-${VERSION}-ketat.apk"
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.VERSION }}
           target_commitish: ${{ github.sha }}
-          files: RebahanGuard-${{ env.VERSION }}.apk
+          files: |
+            RebahanGuard-${{ env.VERSION }}.apk
+            RebahanGuard-${{ env.VERSION }}-ketat.apk
           generate_release_notes: true
 
       - name: Remove the key
