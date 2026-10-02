@@ -1135,9 +1135,10 @@ private fun ProneRow(settings: GuardSettings, editable: Boolean, onChange: (Guar
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var step by remember { mutableStateOf<String?>(null) }
-    var result by remember { mutableStateOf<Float?>(null) }
+    var result by remember { mutableStateOf<Calibrator.ProneResult?>(null) }
     var failed by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
+    val prone = settings.proneElevationDeg.roundToInt()
 
     SettingRow(
         "Deteksi tengkurap",
@@ -1151,10 +1152,10 @@ private fun ProneRow(settings: GuardSettings, editable: Boolean, onChange: (Guar
         },
     ) {
         Text(
-            "Saat tengkurap, layar menghadap ke atas seperti saat duduk menunduk. Jika HP dipegang " +
-                "dengan layar menghadap atas lebih dari ${settings.proneElevationDeg.roundToInt()}°, kamera " +
-                "memeriksa: wajah tepat di atas layar = tengkurap; wajah terlihat miring dari bawah = duduk. " +
-                "Setelah ketahuan, kunci baru terbuka kalau HP benar-benar diturunkan atau diletakkan.",
+            "Saat tengkurap, layar menghadap ke atas, mirip duduk sambil menunduk. Jadi layar di atas $prone° " +
+                "(zona emas di dial) bukan otomatis rebahan: setelah 45 detik " +
+                "di sana, kamera melihat wajahmu. Wajah tepat di atas layar = tengkurap; selain itu = duduk, dan " +
+                "kamera tidak bertanya lagi selama 3 menit. Hanya zona merah yang langsung dianggap rebahan.",
             style = MaterialTheme.typography.bodySmall,
             color = Tone.Muted,
         )
@@ -1164,29 +1165,39 @@ private fun ProneRow(settings: GuardSettings, editable: Boolean, onChange: (Guar
                 TextButton(onClick = { job?.cancel(); step = null }) { Text("Batal") }
             }
             result != null -> {
-                Text("Batas tengkurap baru ${result!!.roundToInt()}°.", style = MaterialTheme.typography.bodyMedium)
+                val r = result!!
+                Text(
+                    "Duduk menunduk: sampai ${r.sittingHighDeg.roundToInt()}°. Tengkurap: mulai ${r.proneLowDeg.roundToInt()}°.\n" +
+                        (if (r.separable) "Keduanya terpisah jelas. " else "Keduanya mirip, jadi batas dibuat agak tinggi supaya duduk tidak ikut dicek. ") +
+                        "Batas tengkurap baru ${r.proneElevationDeg.roundToInt()}°.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { onChange(settings.copy(proneElevationDeg = result!!)); result = null }, shape = CircleShape) { Text("Simpan") }
+                    Button(onClick = { onChange(settings.copy(proneElevationDeg = r.proneElevationDeg)); result = null }, shape = CircleShape) { Text("Simpan") }
                     TextButton(onClick = { result = null }) { Text("Batal") }
                 }
             }
             else -> {
-                if (failed) Text("Posisi itu tidak terlihat seperti tengkurap (layar kurang menghadap ke atas). Coba lagi.",
+                if (failed) Text("Posisi tengkurap tidak lebih menghadap ke atas daripada saat duduk. Coba lagi.",
                     style = MaterialTheme.typography.bodySmall, color = Tone.Blanket)
                 TextButton(enabled = editable && settings.proneDetection, onClick = {
                     failed = false
                     job = scope.launch {
-                        for (s in CALIBRATION_COUNTDOWN_SEC downTo 1) {
-                            step = "Tengkurap dan pegang HP seperti biasa. Merekam dalam $s…"
-                            delay(1_000)
+                        suspend fun record(what: String, n: Int): List<Float> {
+                            for (s in CALIBRATION_COUNTDOWN_SEC downTo 1) {
+                                step = "$n/2 · $what. Merekam dalam $s…"
+                                delay(1_000)
+                            }
+                            step = "$n/2 · Merekam… tahan posisi ${CALIBRATION_RECORD_MS / 1000} detik."
+                            return recordScreenElevations(context, CALIBRATION_RECORD_MS)
                         }
-                        step = "Merekam… tahan posisi ${CALIBRATION_RECORD_MS / 1000} detik."
-                        val samples = recordScreenElevations(context, CALIBRATION_RECORD_MS)
+                        val sitting = record("Duduk dan menunduk melihat HP seperti biasa", 1)
+                        val proneSamples = record("Sekarang tengkurap dan pegang HP seperti biasa", 2)
                         step = null
-                        result = Calibrator.calibrateProne(samples)
+                        result = Calibrator.calibrateProne(sitting, proneSamples, settings.lyingElevationDeg)
                         failed = result == null
                     }
-                }) { Text("Sesuaikan dengan caraku tengkurap") }
+                }) { Text("Sesuaikan: rekam duduk, lalu tengkurap") }
             }
         }
     }

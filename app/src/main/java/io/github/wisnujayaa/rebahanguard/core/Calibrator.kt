@@ -63,11 +63,30 @@ object Calibrator {
      * a little below their lowest typical angle, so their real habit is caught. Null if the
      * recording doesn't look prone at all (screen not facing up enough) or is too short.
      */
-    fun calibrateProne(proneDeg: List<Float>): Float? {
+    data class ProneResult(
+        val proneElevationDeg: Float,
+        /** False: the two holds overlap; the threshold sits above sitting, so sitting stays safe. */
+        val separable: Boolean,
+        val sittingHighDeg: Float,
+        val proneLowDeg: Float,
+    )
+
+    /**
+     * Two recordings, like the lying calibration: sitting while looking down at the phone, and
+     * lying on the stomach. The threshold goes in the middle; if the holds overlap, sitting wins
+     * (a missed prone is better than locking someone who is sitting). Never closer than
+     * [PoseClassifier.MIN_SAFE_BAND_DEG] to the lying threshold.
+     */
+    fun calibrateProne(sittingDeg: List<Float>, proneDeg: List<Float>, lyingElevationDeg: Float): ProneResult? {
+        val sitting = sittingDeg.filter { it.isFinite() && it in -90f..90f }.sorted()
         val prone = proneDeg.filter { it.isFinite() && it in -90f..90f }.sorted()
-        if (prone.size < MIN_SAMPLES) return null
-        if (percentile(prone, 0.5f) < SensorInput.MIN_PRONE_ELEVATION_DEG) return null
-        return SensorInput.sanitizeProneElevationDeg(percentile(prone, 0.10f) - 3f)
+        if (sitting.size < MIN_SAMPLES || prone.size < MIN_SAMPLES) return null
+        if (percentile(prone, 0.5f) <= percentile(sitting, 0.5f)) return null // prone isn't steeper
+        val sitHigh = percentile(sitting, 0.90f)
+        val proneLow = percentile(prone, 0.10f)
+        val separable = proneLow > sitHigh + 4f
+        val raw = if (separable) (sitHigh + proneLow) / 2f else sitHigh + 8f
+        return ProneResult(SensorInput.proneFor(lyingElevationDeg, raw), separable, sitHigh, proneLow)
     }
 
     /** Linear-interpolated percentile of an already sorted, non-empty list. */

@@ -133,11 +133,18 @@ optional **strict mode** (Accessibility), which also backs out of this app's *Ap
 Face-up is also how people sit and look down at a phone, so gravity alone can't decide. Geometry
 can: lying prone, the face is right above the phone and parallel to the screen, so the front
 camera sees it **straight on** (ML Kit head pitch and yaw near 0°); sitting with the phone on a
-desk or in the lap, the upright face is seen **from below at an angle**. A held phone facing up
-beyond a calibratable angle (default 55°) triggers a camera check; a still phone (on a desk)
-never does; without a face it never locks. After a prone lock, a few degrees of tilt don't
-unlock it (**hysteresis**: 20° below the threshold, or put the phone down), and a camera recheck
-can only make releasing harder, never easier — a property the fuzz test caught and now guards.
+desk or in the lap, the upright face is seen **from below at an angle**. But a phone held in the
+hand while sitting is *also* seen straight on, so the camera alone can't be the whole answer —
+the **safe band** has to be protected:
+
+- The prone threshold (default 65°) is always ≥ 30° above the lying threshold (`proneFor`), and is
+  calibrated in two steps — sitting-and-looking-down, then prone — halfway between them (or above
+  sitting if they overlap).
+- The zone above it is shown in gold as *dicek kamera*, not as "lying": only after 45 s there does
+  the camera look; a "sitting" answer silences it for 3 min. A still phone (on a desk) never
+  triggers it, and without a face it never locks.
+- After a prone lock, tilting doesn't unlock it (**hysteresis** = min(20°, half the band)), and a
+  camera recheck can only make releasing harder, never easier — a property the fuzz test guards.
 
 ### Face down on a desk vs. held above your face
 

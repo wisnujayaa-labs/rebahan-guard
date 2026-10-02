@@ -55,6 +55,10 @@ data class GuardConfig(
      * put down) to unlock — tilting it a few degrees while still lying doesn't count.
      */
     val proneReleaseMarginDeg: Float = 20f,
+    /** A steep face-up hold must last this long before the camera looks (sitting tilts are brief). */
+    val proneTriggerDelayMs: Long = 45_000,
+    /** After a prone check found someone sitting, leave the camera off this long. */
+    val proneCooldownMs: Long = 180_000,
 ) {
     init {
         require(triggerDelayMs >= 0) { "triggerDelayMs must be >= 0" }
@@ -85,6 +89,7 @@ data class GuardConfig(
             "proneElevationDeg out of range"
         }
         require(proneReleaseMarginDeg.isFinite() && proneReleaseMarginDeg in 0f..45f) { "proneReleaseMarginDeg out of range" }
+        require(proneTriggerDelayMs >= 0 && proneCooldownMs >= 0) { "prone timings must be >= 0" }
     }
 
     /** Whether holding the phone like this should start the countdown to a camera check. */
@@ -194,7 +199,7 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
 
         return when (phase) {
             Phase.WATCHING -> {
-                if (trigger.update(suspicious, nowMs, currentTriggerDelay(nowMs))) {
+                if (trigger.update(suspicious, nowMs, currentTriggerDelay(nowMs, orientation.pose))) {
                     enter(Phase.CHECKING, nowMs)
                     Action.START_CAMERA_CHECK
                 } else {
@@ -220,7 +225,7 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
                     enter(Phase.WATCHING, nowMs)
                 } else if (nowMs >= cooldownUntilMs) {
                     enter(Phase.WATCHING, nowMs)
-                    trigger.update(true, nowMs, currentTriggerDelay(nowMs)) // count from now
+                    trigger.update(true, nowMs, currentTriggerDelay(nowMs, orientation.pose)) // count from now
                 }
                 Action.NONE
             }
@@ -274,7 +279,8 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
                 Verdict.LYING -> lock(LockReason.CAMERA_CONFIRMED, nowMs)
                 Verdict.NOT_LYING -> {
                     unconfirmedSinceMs = null
-                    enterCooldown(nowMs)
+                    // Sitting with the phone held steeply: don't keep switching the camera on.
+                    enterCooldown(nowMs, if (lastOrientation.pose == Pose.PRONE) maxOf(config.cooldownMs, config.proneCooldownMs) else config.cooldownMs)
                     Action.NONE
                 }
                 Verdict.NO_EVIDENCE -> onNoEvidence(nowMs)
@@ -328,10 +334,16 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         if (!e.isFinite()) return false
         val threshold = config.proneElevationDeg.takeIf { it.isFinite() } ?: return !o.pose.isSuspicious
         if (o.pose == Pose.FACE_UP && e >= threshold) return true // still on a surface
-        return !o.pose.isSuspicious && e < threshold - config.proneReleaseMarginDeg
+        return !o.pose.isSuspicious && e < threshold - releaseMargin()
     }
 
     private var proneLock = false
+
+    /** Hysteresis margin, never more than half the safe band (so there is room to unlock). */
+    private fun releaseMargin(): Float {
+        val band = config.proneElevationDeg - config.lyingElevationDeg
+        return if (band.isFinite()) minOf(config.proneReleaseMarginDeg, band / 2f).coerceAtLeast(0f) else config.proneReleaseMarginDeg
+    }
 
     /**
      * A recheck during a prone lock judges by the prone rule whatever the phone's pose now:
@@ -342,7 +354,7 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         if (face == null || !face.isValid || face.faceWidthRatio < config.minFaceWidthRatio) return false
         val e = lastOrientation.screenElevationDeg
         val threshold = config.proneElevationDeg
-        val stillSteep = e.isFinite() && threshold.isFinite() && e >= threshold - config.proneReleaseMarginDeg
+        val stillSteep = e.isFinite() && threshold.isFinite() && e >= threshold - releaseMargin()
         return !(face.isFrontal && stillSteep)
     }
 
@@ -384,10 +396,11 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         return action
     }
 
-    private fun currentTriggerDelay(nowMs: Long): Long {
-        val caught = lastCaughtMs ?: return config.triggerDelayMs
-        val since = nowMs - caught
-        return if (since >= 0 && since < config.relockWindowMs) config.relockDelayMs else config.triggerDelayMs
+    private fun currentTriggerDelay(nowMs: Long, pose: Pose): Long {
+        val caught = lastCaughtMs
+        val since = if (caught == null) -1 else nowMs - caught
+        if (since >= 0 && since < config.relockWindowMs) return config.relockDelayMs
+        return if (pose == Pose.PRONE) maxOf(config.triggerDelayMs, config.proneTriggerDelayMs) else config.triggerDelayMs
     }
 
     private fun enter(next: Phase, nowMs: Long) {

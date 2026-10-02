@@ -56,13 +56,24 @@ object SensorInput {
     fun toPose(values: FloatArray?, deviceLocked: Boolean): Pose =
         toOrientation(values, deviceLocked).pose
 
-    const val MIN_PRONE_ELEVATION_DEG = 40f
+    const val MIN_PRONE_ELEVATION_DEG = 50f
     const val MAX_PRONE_ELEVATION_DEG = 85f
 
     /** NaN (off) stays NaN; anything else is clamped into the supported range. */
     fun sanitizeProneElevationDeg(raw: Float): Float =
         if (raw.isNaN()) Float.NaN else if (!raw.isFinite()) PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG
         else raw.coerceIn(MIN_PRONE_ELEVATION_DEG, MAX_PRONE_ELEVATION_DEG)
+
+    /**
+     * The prone threshold that may be used with a given lying threshold: at least
+     * [PoseClassifier.MIN_SAFE_BAND_DEG] above it, so normal sitting always has room.
+     */
+    fun proneFor(lyingElevationDeg: Float, proneElevationDeg: Float): Float {
+        val p = sanitizeProneElevationDeg(proneElevationDeg)
+        if (p.isNaN()) return p
+        val floor = sanitizeLyingElevationDeg(lyingElevationDeg) + PoseClassifier.MIN_SAFE_BAND_DEG
+        return maxOf(p, floor).coerceAtMost(MAX_PRONE_ELEVATION_DEG)
+    }
 
     const val MIN_DELAY_SEC = 5
     const val MAX_DELAY_SEC = 120

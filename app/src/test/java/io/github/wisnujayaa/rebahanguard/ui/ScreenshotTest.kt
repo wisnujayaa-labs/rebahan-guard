@@ -153,7 +153,7 @@ class ScreenshotTest {
     fun dial_sitting() = shot("dial_sitting") { ScreenAngleDial(elevationDeg = 38f, thresholdDeg = -5f, alarming = false) }
 
     @Test
-    fun dial_prone() = shot("dial_prone") { ScreenAngleDial(elevationDeg = 70f, thresholdDeg = -5f, alarming = false, proneDeg = 55f) }
+    fun dial_prone() = shot("dial_prone") { ScreenAngleDial(elevationDeg = 72f, thresholdDeg = -5f, alarming = false, proneDeg = 65f) }
 
     @Test
     @Config(qualifiers = "+night")

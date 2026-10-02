@@ -56,7 +56,10 @@ fun ScreenAngleDial(
     val hasReading = elevationDeg.isFinite()
     val target = if (hasReading) elevationDeg.coerceIn(-90f, 90f) else 0f
     val angle by animateFloatAsState(target, animationSpec = tween(150), label = "screenAngle")
-    val inBed = hasReading && (elevationDeg < thresholdDeg || (proneDeg.isFinite() && elevationDeg >= proneDeg))
+    // Only the red zone counts as lying. The gold zone above proneDeg is merely "checked by the
+    // camera": sitting and looking down can reach it too, so it must not look like a verdict.
+    val inBed = hasReading && elevationDeg < thresholdDeg
+    val inCheck = hasReading && !inBed && proneDeg.isFinite() && elevationDeg >= proneDeg
 
     val reducedMotion = rememberReducedMotion()
     val pulse by rememberInfiniteTransition(label = "alarm").animateFloat(
@@ -74,7 +77,7 @@ fun ScreenAngleDial(
     val textMeasurer = rememberTextMeasurer()
     val labelStyle = TextStyle(color = p.Muted, fontSize = 12.sp)
     val description = if (hasReading) {
-        "Layar menghadap ${angle.roundToInt()} derajat, ${if (inBed) "zona rebahan" else "zona aman"}"
+        "Layar menghadap ${angle.roundToInt()} derajat, ${zoneText(inBed, inCheck)}"
     } else {
         "Membaca sensor"
     }
@@ -97,7 +100,7 @@ fun ScreenAngleDial(
             if (proneDeg.isFinite()) {
                 // Face up steeply in the hand: the tengkurap zone (confirmed by the camera).
                 val pr = proneDeg.coerceIn(-90f, 90f)
-                drawArc(p.Blanket.copy(alpha = blanketAlpha * 0.6f), -90f, 90f - pr, useCenter = true, topLeft = boxTopLeft, size = box)
+                drawArc(p.Lamp.copy(alpha = if (inCheck) 0.45f else 0.22f), -90f, 90f - pr, useCenter = true, topLeft = boxTopLeft, size = box)
             }
             drawArc(
                 p.Blanket.copy(alpha = blanketAlpha), -thr, 90f + thr,
@@ -123,6 +126,10 @@ fun ScreenAngleDial(
             )
 
             labelAt(textMeasurer, "langit-langit", c + Offset(10.dp.toPx(), -r + 6.dp.toPx()), labelStyle)
+            if (proneDeg.isFinite()) {
+                val mid = (proneDeg.coerceIn(-90f, 90f) + 90f) / 2f
+                labelAt(textMeasurer, "dicek kamera", c + direction(mid) * (r * 0.42f) + Offset(0f, 14.dp.toPx()), labelStyle.copy(color = p.Lamp))
+            }
             labelAt(textMeasurer, "lantai", c + Offset(10.dp.toPx(), r - 22.dp.toPx()), labelStyle)
             labelAt(
                 textMeasurer, "batas",
@@ -134,7 +141,7 @@ fun ScreenAngleDial(
                 // Where the screen is looking.
                 val gaze = direction(angle)
                 drawLine(
-                    if (inBed) p.Text else p.Mint,
+                    when { inBed -> p.Text; inCheck -> p.Lamp; else -> p.Mint },
                     c + gaze * 14.dp.toPx(), c + gaze * (r - 12.dp.toPx()),
                     strokeWidth = 3.dp.toPx(),
                     cap = StrokeCap.Round,
@@ -172,14 +179,19 @@ fun ScreenAngleDial(
             Text(
                 when {
                     !hasReading -> "membaca sensor"
-                    inBed -> "zona rebahan"
-                    else -> "zona aman"
+                    else -> zoneText(inBed, inCheck)
                 },
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (inBed) p.Blanket else p.Mint,
+                color = when { inBed -> p.Blanket; inCheck -> p.Lamp; else -> p.Mint },
             )
         }
     }
+}
+
+private fun zoneText(inBed: Boolean, inCheck: Boolean) = when {
+    inBed -> "zona rebahan"
+    inCheck -> "dicek kamera"
+    else -> "zona aman"
 }
 
 /** Unit vector for a screen elevation, in canvas coordinates (y grows downward). */

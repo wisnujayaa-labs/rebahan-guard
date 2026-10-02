@@ -247,9 +247,11 @@ class GuardService : LifecycleService(), SensorEventListener {
             triggerDelayMs = delaySec * 1_000L,
             lyingElevationDeg = lyingElevationDeg,
             strictMode = intent?.getBooleanExtra(EXTRA_STRICT, false) ?: false,
-            proneElevationDeg = SensorInput.sanitizeProneElevationDeg(
+            // NaN (prone detection off) stays NaN.
+            proneElevationDeg = SensorInput.proneFor(
+                lyingElevationDeg,
                 intent?.getFloatExtra(EXTRA_PRONE, PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG)
-                    ?: PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG
+                    ?: PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG,
             ),
         )
         lockEnabled = intent?.getBooleanExtra(EXTRA_LOCK, true) ?: true

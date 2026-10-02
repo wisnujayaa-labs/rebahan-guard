@@ -36,8 +36,11 @@ data class GuardSettings(
         alarmSoundUri = AlarmSoundPolicy.sanitize(alarmSoundUri),
         commitmentHours = commitmentHours.coerceIn(0, Commitment.MAX_HOURS),
         schedule = schedule.sanitized(),
-        proneElevationDeg = SensorInput.sanitizeProneElevationDeg(proneElevationDeg).takeIf { it.isFinite() }
-            ?: PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG,
+        // Keep a wide safe band between "lying" and "prone": see SensorInput.proneFor.
+        proneElevationDeg = SensorInput.proneFor(
+            lyingElevationDeg,
+            proneElevationDeg.takeIf { it.isFinite() } ?: PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG,
+        ),
     )
 
     fun save(context: Context) {

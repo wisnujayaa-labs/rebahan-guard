@@ -10,7 +10,8 @@ import kotlin.math.sin
 
 /** Lying on the stomach (tengkurap) with the phone facing up. */
 class ProneTest {
-    private val config = GuardConfig() // prone detection on, threshold 55°
+    private val config = GuardConfig() // prone detection on, threshold 65°, lying threshold -5°
+    private val dwell = maxOf(config.triggerDelayMs, config.proneTriggerDelayMs)
 
     /** Gravity for a phone held upright-ish with the screen tilted up to [elevationDeg]. */
     private fun gravity(elevationDeg: Float): Triple<Float, Float, Float> {
@@ -29,8 +30,8 @@ class ProneTest {
     @Test
     fun steepFaceUp_isProne_onlyWhenEnabled() {
         assertEquals(Pose.PRONE, measure(70f).pose)
-        assertEquals(Pose.PRONE, measure(55f).pose)
-        assertEquals(Pose.FACE_UP, measure(50f).pose)
+        assertEquals(Pose.PRONE, measure(66f).pose)
+        assertEquals(Pose.FACE_UP, measure(60f).pose) // sitting and looking down: not even checked
         assertEquals(Pose.FACE_UP, measure(70f, prone = Float.NaN).pose) // disabled
         assertEquals(Pose.UPRIGHT, measure(20f).pose) // normal sitting
     }
@@ -64,13 +65,15 @@ class ProneTest {
         val prone = measure(70f)
         assertEquals(Action.NONE, engine.onPose(prone, t))
         t += config.triggerDelayMs
+        assertEquals(Action.NONE, engine.onPose(prone, t)) // prone needs a longer dwell
+        t = dwell
         assertEquals(Action.START_CAMERA_CHECK, engine.onPose(prone, t))
         assertEquals(Action.START_ALARM, engine.onFaceResult(frontal, t + 1_000))
         assertEquals(LockReason.CAMERA_CONFIRMED, engine.lastLockReason)
 
-        // Tilting a few degrees below the threshold while still lying: stays locked.
+        // Tilting below the threshold while still lying: stays locked (margin = 20°, release < 45°).
         t += 2_000
-        val slightlyLower = measure(45f)
+        val slightlyLower = measure(50f)
         repeat(5) { engine.onPose(slightlyLower, t); t += 1_000 }
         assertEquals(Phase.ALARMING, engine.phase)
 
@@ -85,8 +88,8 @@ class ProneTest {
         val engine = GuardEngine(config)
         val prone = measure(70f)
         engine.onPose(prone, 0)
-        engine.onPose(prone, config.triggerDelayMs)
-        engine.onFaceResult(frontal, config.triggerDelayMs + 500)
+        engine.onPose(prone, dwell)
+        engine.onFaceResult(frontal, dwell + 500)
         val onTable = DeskRest.resolve(measure(88f), proximityNear = false, still = true)
         engine.onPose(onTable, 30_000)
         assertEquals(Action.STOP_ALARM, engine.onPose(onTable, 30_000 + config.releaseMs))
@@ -97,16 +100,16 @@ class ProneTest {
         val engine = GuardEngine(config)
         val prone = measure(70f)
         engine.onPose(prone, 0)
-        engine.onPose(prone, config.triggerDelayMs)
-        engine.onFaceResult(frontal, config.triggerDelayMs + 500)
-        // tilt to 45°, a recheck sees the same frontal face: still lying
-        var t = config.triggerDelayMs + 500 + config.lockRecheckMs
-        assertEquals(Action.START_CAMERA_CHECK, engine.onPose(measure(45f), t))
+        engine.onPose(prone, dwell)
+        engine.onFaceResult(frontal, dwell + 500)
+        // tilt to 50°, a recheck sees the same frontal face: still lying
+        var t = dwell + 500 + config.lockRecheckMs
+        assertEquals(Action.START_CAMERA_CHECK, engine.onPose(measure(50f), t))
         assertEquals(Action.NONE, engine.onFaceResult(frontal, t + 500))
         assertEquals(Phase.ALARMING, engine.phase)
         // a recheck that sees the face from below (sitting up) releases
         t += config.lockRecheckMs + 1_000
-        assertEquals(Action.START_CAMERA_CHECK, engine.onPose(measure(45f), t))
+        assertEquals(Action.START_CAMERA_CHECK, engine.onPose(measure(50f), t))
         assertEquals(Action.STOP_ALARM, engine.onFaceResult(fromBelow, t + 500))
     }
 
@@ -115,13 +118,13 @@ class ProneTest {
         val engine = GuardEngine(config)
         val prone = measure(70f)
         engine.onPose(prone, 0)
-        engine.onPose(prone, config.triggerDelayMs)
-        assertEquals(Action.NONE, engine.onFaceResult(fromBelow, config.triggerDelayMs + 500))
+        engine.onPose(prone, dwell)
+        assertEquals(Action.NONE, engine.onFaceResult(fromBelow, dwell + 500))
         assertEquals(Phase.COOLDOWN, engine.phase)
         // and with no face at all: never locks, however long it goes on
-        var t = config.triggerDelayMs + 1_000
+        var t = dwell + 1_000
         repeat(50) {
-            t += config.cooldownMs + config.triggerDelayMs
+            t += config.proneCooldownMs + dwell
             engine.onPose(prone, t)
             if (engine.phase == Phase.CHECKING) engine.onFaceResult(null, t + 100)
             assertTrue(engine.phase != Phase.ALARMING)
@@ -129,19 +132,53 @@ class ProneTest {
     }
 
     @Test
-    fun calibrateProne() {
-        val samples = (0 until 30).map { 62f + (it % 10) }
-        val t = Calibrator.calibrateProne(samples)!!
-        assertTrue("$t", t in 55f..62f)
-        assertNull(Calibrator.calibrateProne(listOf(20f, 21f, 22f, 23f, 24f, 25f, 26f, 27f, 28f, 29f))) // not prone-like
-        assertNull(Calibrator.calibrateProne(listOf(70f, 71f))) // too short
+    fun sittingResult_quietsTheCameraForLonger() {
+        val engine = GuardEngine(config)
+        val prone = measure(72f)
+        engine.onPose(prone, 0)
+        engine.onPose(prone, dwell)
+        engine.onFaceResult(fromBelow, dwell)
+        engine.onPose(prone, dwell + config.cooldownMs + 1_000)
+        assertEquals(Phase.COOLDOWN, engine.phase) // ordinary cooldown would be over by now
+        engine.onPose(prone, dwell + config.proneCooldownMs + 1_000)
+        assertTrue(engine.phase != Phase.COOLDOWN)
+    }
+
+    private fun range(from: Int) = (0 until 20).map { from + (it % 10).toFloat() }
+
+    @Test
+    fun calibrateProne_twoSteps() {
+        // clearly apart: halfway between the highest sitting and lowest prone angle
+        val a = Calibrator.calibrateProne(range(40), range(70), -5f)!!
+        assertTrue("$a", a.separable && a.proneElevationDeg in 58f..61f)
+        // overlapping: a little above sitting, so sitting is never checked
+        val b = Calibrator.calibrateProne(range(50), range(55), -5f)!!
+        assertFalse(b.separable)
+        assertTrue("$b", b.proneElevationDeg > b.sittingHighDeg + 7f)
+        // the safe band to the lying threshold is never squeezed below 30°
+        val c = Calibrator.calibrateProne(range(40), range(70), 30f)!!
+        assertEquals(60f, c.proneElevationDeg, 0.01f)
+        // never below the minimum
+        assertEquals(SensorInput.MIN_PRONE_ELEVATION_DEG, Calibrator.calibrateProne(range(10), range(30), -5f)!!.proneElevationDeg, 0.01f)
+        assertNull(Calibrator.calibrateProne(range(60), range(30), -5f)) // prone not steeper
+        assertNull(Calibrator.calibrateProne(range(40), listOf(70f, 71f), -5f)) // too short
+    }
+
+    @Test
+    fun safeBand_isAlwaysWide() {
+        for (lying in -60..30 step 5) for (prone in 40..90 step 5) {
+            val p = SensorInput.proneFor(lying.toFloat(), prone.toFloat())
+            assertTrue("lying=$lying prone=$prone -> $p", p - lying >= PoseClassifier.MIN_SAFE_BAND_DEG - 0.01f)
+            GuardConfig(lyingElevationDeg = lying.toFloat(), proneElevationDeg = p) // valid
+        }
+        assertTrue(SensorInput.proneFor(-5f, Float.NaN).isNaN())
     }
 
     @Test
     fun sanitize() {
         assertTrue(SensorInput.sanitizeProneElevationDeg(Float.NaN).isNaN())
         assertEquals(85f, SensorInput.sanitizeProneElevationDeg(120f))
-        assertEquals(40f, SensorInput.sanitizeProneElevationDeg(-10f))
+        assertEquals(50f, SensorInput.sanitizeProneElevationDeg(-10f))
         assertEquals(PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG, SensorInput.sanitizeProneElevationDeg(Float.POSITIVE_INFINITY))
     }
 

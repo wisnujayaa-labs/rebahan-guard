@@ -99,7 +99,10 @@ object PoseClassifier {
     const val DEFAULT_LYING_ELEVATION_DEG = -5f
 
     /** Default for prone detection; calibratable per person (see Calibrator.calibrateProne). */
-    const val DEFAULT_PRONE_ELEVATION_DEG = 55f
+    const val DEFAULT_PRONE_ELEVATION_DEG = 65f
+
+    /** The safe band between "lying on the back" and "maybe prone" is never narrower than this. */
+    const val MIN_SAFE_BAND_DEG = 30f
 
     /** Readings whose magnitude is below this are ignored (gravity should be ~9.81). */
     private const val MIN_MAGNITUDE = 1.0f
