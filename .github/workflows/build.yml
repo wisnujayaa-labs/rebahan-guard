@@ -43,7 +43,9 @@ jobs:
       # Build and publish the APK first, so a failing test or lint finding never blocks
       # getting the app (the run still turns red).
       - name: Build debug APK
-        run: ./gradlew assembleDebug
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug 2>&1 | tee build.log
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -88,6 +90,15 @@ jobs:
                   msg = f'[{issue.get("id")}] {issue.get("message")}'.replace("\n", " ")
                   print(f"::{level} file={file},line={line}::{msg}")
           PY
+
+      # Compile errors as annotations (readable on the public run page without logs access).
+      - name: Annotate compile errors
+        if: failure()
+        run: |
+          [ -f build.log ] || exit 0
+          grep -E "^e: |error:|What went wrong" -A3 build.log | head -60 | while IFS= read -r line; do
+            echo "::error title=build::${line//%/%25}"
+          done
 
       # Turn failing tests into annotations as well.
       - name: Annotate test failures
