@@ -22,7 +22,6 @@ import io.github.wisnujayaa.rebahanguard.service.GuardStatus
 import io.github.wisnujayaa.rebahanguard.service.LastCheck
 import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.Timeout
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
@@ -36,8 +35,9 @@ import org.robolectric.annotation.GraphicsMode
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34], qualifiers = "w411dp-h891dp-xxhdpi")
 class ScreenshotTest {
+    // No JUnit Timeout rule here: it runs the test on another thread, and Robolectric's main
+    // looper may only be driven from the test's main thread.
     @get:Rule val compose = createComposeRule()
-    @get:Rule val timeout: Timeout = Timeout.seconds(120)
 
     private fun shot(name: String, content: @Composable () -> Unit) {
         compose.setContent {
