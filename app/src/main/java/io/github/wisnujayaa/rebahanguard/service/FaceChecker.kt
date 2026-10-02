@@ -12,9 +12,11 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import io.github.wisnujayaa.rebahanguard.core.CheckReport
 import io.github.wisnujayaa.rebahanguard.core.FaceObservation
 import io.github.wisnujayaa.rebahanguard.core.GuardConfig
 import java.util.concurrent.ExecutorService
@@ -22,15 +24,16 @@ import java.util.concurrent.Executors
 
 /**
  * Turns the front camera on for a short window, runs on-device face detection (ML Kit) on
- * each frame and reports the largest face it saw. Frames are analysed in memory and
- * discarded immediately — nothing is saved or sent anywhere.
+ * each frame and reports the largest face it saw, plus a [CheckReport] explaining the result.
+ * Frames are analysed in memory and discarded immediately — nothing is saved or sent anywhere.
  */
 class FaceChecker(private val context: Context, private val config: GuardConfig) {
 
     private val detector = FaceDetection.getClient(
         FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setMinFaceSize(0.15f)
+            // ACCURATE copes much better with tilted heads and faces seen from below.
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setMinFaceSize(0.1f)
             .build()
     )
 
@@ -41,18 +44,37 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
     private var analysis: ImageAnalysis? = null
     private var session: Session? = null
 
-    private class Session(val onResult: (FaceObservation?) -> Unit) {
+    private class Session(
+        val onDark: () -> Unit,
+        val onResult: (FaceObservation?, CheckReport) -> Unit,
+    ) {
         @Volatile var done = false
         var best: FaceObservation? = null
         var timeout: Runnable? = null
+
+        // Diagnostics, only touched on the main thread.
+        var frames = 0
+        var lumaSum = 0.0
+        var detectorErrors = 0
+        var modelNotReady = false
+        var cameraUnavailable = false
+        var darkSignalled = false
+        var usedRingLight = false
     }
 
     val isChecking: Boolean get() = session != null
 
-    /** Must be called on the main thread. [onResult] is delivered on the main thread. */
-    fun check(owner: LifecycleOwner, onResult: (FaceObservation?) -> Unit) {
+    /**
+     * Must be called on the main thread. [onDark] fires (once) if the first frames are too dark,
+     * so the caller can light the user's face; [onResult] is delivered on the main thread.
+     */
+    fun check(
+        owner: LifecycleOwner,
+        onDark: () -> Unit = {},
+        onResult: (FaceObservation?, CheckReport) -> Unit,
+    ) {
         if (session != null) return
-        val s = Session(onResult)
+        val s = Session(onDark, onResult)
         session = s
 
         // Start the clock immediately, not after the camera opens: if the camera provider
@@ -82,6 +104,7 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
             } catch (e: Exception) {
                 // Camera busy (e.g. a video call), no front camera, permission revoked...
                 Log.w(TAG, "Camera check failed", e)
+                s.cameraUnavailable = true
                 finish(s)
             }
         }, ContextCompat.getMainExecutor(context))
@@ -102,6 +125,9 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
             return
         }
 
+        val luma = meanLuma(proxy)
+        mainHandler.post { onFrame(s, luma) }
+
         try {
             val input = InputImage.fromMediaImage(mediaImage, rotation)
             detector.process(input)
@@ -114,13 +140,58 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
                     )
                     mainHandler.post { onObservation(s, observation) }
                 }
-                .addOnFailureListener { e -> Log.w(TAG, "Face detection failed", e) }
+                .addOnFailureListener { e ->
+                    val notReady = e is MlKitException && e.errorCode == MlKitException.UNAVAILABLE
+                    Log.w(TAG, "Face detection failed (modelNotReady=$notReady)", e)
+                    mainHandler.post {
+                        s.detectorErrors++
+                        if (notReady) s.modelNotReady = true
+                    }
+                }
                 .addOnCompleteListener { proxy.close() }
         } catch (e: Exception) {
             // e.g. the detector was closed by release() while this frame was in flight.
             // Never let an exception escape the analysis thread: that would crash the app.
             Log.w(TAG, "Could not analyse frame", e)
+            mainHandler.post { s.detectorErrors++ }
             proxy.close()
+        }
+    }
+
+    /** Average brightness of the Y (luminance) plane, sampling every 16th pixel. */
+    private fun meanLuma(proxy: ImageProxy): Float = try {
+        val plane = proxy.planes[0]
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        var sum = 0L
+        var n = 0
+        var y = 0
+        while (y < proxy.height) {
+            var x = 0
+            while (x < proxy.width) {
+                val index = y * rowStride + x * pixelStride
+                if (index < buffer.limit()) {
+                    sum += buffer.get(index).toInt() and 0xff // absolute get: position unchanged
+                    n++
+                }
+                x += 16
+            }
+            y += 16
+        }
+        if (n == 0) Float.NaN else sum.toFloat() / n
+    } catch (e: Exception) {
+        Float.NaN
+    }
+
+    private fun onFrame(s: Session, luma: Float) {
+        if (s.done) return
+        s.frames++
+        if (luma.isFinite()) s.lumaSum += luma
+        if (!s.darkSignalled && luma.isFinite() && luma < CheckReport.DARK_LUMA) {
+            s.darkSignalled = true
+            s.usedRingLight = true
+            s.onDark()
         }
     }
 
@@ -136,7 +207,22 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
         if (s.done) return
         s.done = true
         stopCamera(s)
-        s.onResult(s.best)
+        val meanLuma = if (s.frames > 0) (s.lumaSum / s.frames).toFloat() else Float.NaN
+        val report = CheckReport(
+            reason = CheckReport.classify(
+                bestFace = s.best,
+                minFaceWidthRatio = config.minFaceWidthRatio,
+                frames = s.frames,
+                meanLuma = meanLuma,
+                modelNotReady = s.modelNotReady,
+                detectorErrors = s.detectorErrors,
+                cameraUnavailable = s.cameraUnavailable,
+            ),
+            frames = s.frames,
+            meanLuma = meanLuma,
+            usedRingLight = s.usedRingLight,
+        )
+        s.onResult(s.best, report)
     }
 
     /** Stops an in-flight check without reporting a result. */

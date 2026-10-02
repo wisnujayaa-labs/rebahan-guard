@@ -4,6 +4,7 @@ import android.content.Context
 import io.github.wisnujayaa.rebahanguard.core.AlarmSoundPolicy
 import io.github.wisnujayaa.rebahanguard.core.Commitment
 import io.github.wisnujayaa.rebahanguard.core.PoseClassifier
+import io.github.wisnujayaa.rebahanguard.core.Schedule
 import io.github.wisnujayaa.rebahanguard.core.SensorInput
 
 /**
@@ -20,12 +21,15 @@ data class GuardSettings(
     val lockScreen: Boolean = true,
     /** 0 = no commitment; otherwise the guard can't simply be switched off for this many hours. */
     val commitmentHours: Int = 0,
+    /** Nightly window in which the guard is enforced (and can't simply be switched off). */
+    val schedule: Schedule = Schedule.DEFAULT,
 ) {
     fun sanitized() = copy(
         delaySec = SensorInput.sanitizeDelaySec(delaySec),
         lyingElevationDeg = SensorInput.sanitizeLyingElevationDeg(lyingElevationDeg),
         alarmSoundUri = AlarmSoundPolicy.sanitize(alarmSoundUri),
         commitmentHours = commitmentHours.coerceIn(0, Commitment.MAX_HOURS),
+        schedule = schedule.sanitized(),
     )
 
     fun save(context: Context) {
@@ -37,6 +41,9 @@ data class GuardSettings(
             .putString(KEY_ALARM_URI, s.alarmSoundUri)
             .putBoolean(KEY_LOCK, s.lockScreen)
             .putInt(KEY_COMMIT_HOURS, s.commitmentHours)
+            .putBoolean(KEY_SCHEDULE_ON, s.schedule.enabled)
+            .putInt(KEY_SCHEDULE_START, s.schedule.startMinute)
+            .putInt(KEY_SCHEDULE_END, s.schedule.endMinute)
             .apply()
     }
 
@@ -48,6 +55,9 @@ data class GuardSettings(
         private const val KEY_ALARM_URI = "alarm_uri"
         private const val KEY_LOCK = "lock_screen"
         private const val KEY_COMMIT_HOURS = "commitment_hours"
+        private const val KEY_SCHEDULE_ON = "schedule_on"
+        private const val KEY_SCHEDULE_START = "schedule_start"
+        private const val KEY_SCHEDULE_END = "schedule_end"
 
         private fun prefs(context: Context) =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -62,6 +72,11 @@ data class GuardSettings(
                     alarmSoundUri = p.getString(KEY_ALARM_URI, null),
                     lockScreen = p.getBoolean(KEY_LOCK, true),
                     commitmentHours = p.getInt(KEY_COMMIT_HOURS, 0),
+                    schedule = Schedule(
+                        enabled = p.getBoolean(KEY_SCHEDULE_ON, Schedule.DEFAULT.enabled),
+                        startMinute = p.getInt(KEY_SCHEDULE_START, Schedule.DEFAULT.startMinute),
+                        endMinute = p.getInt(KEY_SCHEDULE_END, Schedule.DEFAULT.endMinute),
+                    ),
                 ).sanitized()
             } catch (e: ClassCastException) {
                 // A key stored with a different type (e.g. by an older version): start fresh.

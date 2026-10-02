@@ -20,7 +20,62 @@ data class FaceObservation(val faceWidthRatio: Float, val rollDeg: Float) {
  * Sensor fusion: combines the phone's orientation (from gravity) with the face's
  * orientation (from the camera) to infer the orientation of the user's HEAD.
  */
+/** What one camera check concluded. */
+enum class Verdict {
+    /** A face was seen and its orientation says the user is lying down. */
+    LYING,
+
+    /** A face was seen and the user is clearly upright (e.g. sitting). */
+    NOT_LYING,
+
+    /** No usable face: too dark, out of frame, too far, or the detector failed. */
+    NO_EVIDENCE,
+}
+
+/** How strongly the phone's orientation alone (gravity) suggests lying down. */
+enum class Evidence {
+    /** Screen clearly facing the floor: almost nobody uses a phone like this unless lying down. */
+    STRONG,
+
+    /** A lying pose, but one that could also happen otherwise (slightly tilted, sideways). */
+    MEDIUM,
+
+    /** Only suspicious in strict mode (phone upright). */
+    WEAK,
+
+    NONE,
+}
+
 object LyingJudge {
+    fun verdict(orientation: Orientation, face: FaceObservation?, config: GuardConfig): Verdict {
+        if (face == null || !face.isValid || face.faceWidthRatio < config.minFaceWidthRatio) {
+            return Verdict.NO_EVIDENCE
+        }
+        if (isLying(orientation, face, config)) return Verdict.LYING
+        return when (orientation.pose) {
+            Pose.FACE_UP -> Verdict.NOT_LYING
+            Pose.SIDEWAYS, Pose.UPRIGHT, Pose.UPSIDE_DOWN, Pose.TILTED ->
+                // A visible face but an undecidable angle (phone held diagonally, or flat) is
+                // not proof of sitting.
+                if (headTiltDeg(orientation.inPlaneRotationDeg, face.rollDeg) == null) {
+                    Verdict.NO_EVIDENCE
+                } else {
+                    Verdict.NOT_LYING
+                }
+            Pose.FACE_DOWN, Pose.UNKNOWN -> Verdict.NO_EVIDENCE
+        }
+    }
+
+    fun evidence(orientation: Orientation, config: GuardConfig): Evidence {
+        val pose = orientation.pose
+        return when {
+            pose == Pose.FACE_DOWN && orientation.screenElevationDeg < config.strongElevationDeg -> Evidence.STRONG
+            pose.isSuspicious -> Evidence.MEDIUM
+            config.isSuspicious(pose) -> Evidence.WEAK
+            else -> Evidence.NONE
+        }
+    }
+
     /**
      * Holding the phone diagonally (≈45°) makes "face upright" and "face sideways" look the same
      * once the sign of the angles is ignored, so within this band we refuse to decide.

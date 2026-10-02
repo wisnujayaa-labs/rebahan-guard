@@ -8,12 +8,12 @@ data class GuardConfig(
     /** While locked, the user must stay out of a suspicious pose this long to unlock. */
     val releaseMs: Long = 1_500,
     /** Maximum time the camera stays on for one check. */
-    val cameraWindowMs: Long = 4_000,
+    val cameraWindowMs: Long = 6_000,
     /**
      * Watchdog: if the camera never reports back (driver hang, lost callback), give up after
      * this long instead of waiting forever. Must be longer than [cameraWindowMs].
      */
-    val checkTimeoutMs: Long = 10_000,
+    val checkTimeoutMs: Long = 12_000,
     /**
      * Safety cap: one lockdown never lasts longer than this. If detection were ever wrong, the
      * user can't be locked out of their phone indefinitely.
@@ -27,7 +27,18 @@ data class GuardConfig(
      */
     val relockWindowMs: Long = 600_000,
     val relockDelayMs: Long = 3_000,
-    val minFaceWidthRatio: Float = 0.20f,
+    /**
+     * Below this screen elevation, the pose alone is enough to lock even if the camera sees no
+     * face (dark room, face out of frame): see [Evidence.STRONG].
+     */
+    val strongElevationDeg: Float = -30f,
+    /** A MEDIUM pose with repeatedly no usable face locks after this long. */
+    val unconfirmedLockMs: Long = 120_000,
+    /** After a check without evidence, look again sooner than after a clear "sitting" result. */
+    val noEvidenceCooldownMs: Long = 20_000,
+    /** A gap this long without any suspicious pose forgets the unconfirmed suspicion. */
+    val unconfirmedResetGapMs: Long = 300_000,
+    val minFaceWidthRatio: Float = 0.15f,
     /** A head tilted at least this far from vertical (in the screen plane) counts as lying. */
     val minHeadTiltDeg: Float = 45f,
     /** Screen elevation below this = "looking up at the phone" (see [Pose.FACE_DOWN]). */
@@ -48,6 +59,10 @@ data class GuardConfig(
         require(lockRecheckMs in 1..maxLockMs) { "lockRecheckMs must be in (0, maxLockMs]" }
         require(relockWindowMs >= 0) { "relockWindowMs must be >= 0" }
         require(relockDelayMs in 0..triggerDelayMs) { "relockDelayMs must be in [0, triggerDelayMs]" }
+        require(strongElevationDeg.isFinite() && strongElevationDeg in -90f..0f) { "strongElevationDeg must be in [-90, 0]" }
+        require(unconfirmedLockMs > 0) { "unconfirmedLockMs must be > 0" }
+        require(noEvidenceCooldownMs >= 0) { "noEvidenceCooldownMs must be >= 0" }
+        require(unconfirmedResetGapMs > 0) { "unconfirmedResetGapMs must be > 0" }
         require(minFaceWidthRatio.isFinite() && minFaceWidthRatio > 0f && minFaceWidthRatio <= 1f) {
             "minFaceWidthRatio must be in (0, 1]"
         }
@@ -91,13 +106,26 @@ enum class Phase {
  */
 enum class Action { NONE, START_CAMERA_CHECK, CANCEL_CAMERA_CHECK, START_ALARM, STOP_ALARM }
 
+/** Why the phone was locked (shown to the user and counted in statistics). */
+enum class LockReason {
+    /** The camera saw a lying head. */
+    CAMERA_CONFIRMED,
+
+    /** Screen clearly facing the floor; the camera saw nothing usable. */
+    STRONG_POSE,
+
+    /** A lying pose kept going for minutes while the camera kept failing. */
+    PERSISTENT_SUSPICION,
+}
+
 /**
  * The whole decision process as a pure state machine (no Android imports), so it can be
  * unit-tested with fake timestamps.
  *
  * WATCHING ──(suspicious pose held ≥ delay*)──▶ CHECKING
  * CHECKING ──(face says lying)──▶ ALARMING (locked)
- * CHECKING ──(no face / not lying / watchdog timeout)──▶ COOLDOWN
+ * CHECKING ──(no face, but STRONG pose or MEDIUM pose for unconfirmedLock)──▶ ALARMING (locked)
+ * CHECKING ──(not lying / no evidence otherwise / watchdog timeout)──▶ COOLDOWN
  * ALARMING ──(normal pose held ≥ release)──▶ WATCHING            (unlocked: user sat up)
  * ALARMING ──(strict lock: camera re-check says not lying)──▶ COOLDOWN
  * ALARMING ──(locked for maxLock)──▶ COOLDOWN                    (safety cap)
@@ -134,11 +162,24 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
     /** When the user was last caught lying. Survives screen-off on purpose. */
     private var lastCaughtMs: Long? = null
 
+    /** First camera check that found no evidence during the current stretch of suspicion. */
+    private var unconfirmedSinceMs: Long? = null
+    private var lastSuspiciousMs: Long? = null
+
+    /** Why the current/last lock happened. */
+    var lastLockReason: LockReason? = null
+        private set
+
+    /** The current lock happened shortly after a previous one (no warning grace period). */
+    var lastLockWasRepeat: Boolean = false
+        private set
+
     fun onPose(pose: Pose, nowMs: Long): Action = onPose(Orientation.of(pose), nowMs)
 
     fun onPose(orientation: Orientation, nowMs: Long): Action {
         lastOrientation = orientation
         val suspicious = config.isSuspicious(orientation.pose)
+        trackSuspicion(orientation.pose, nowMs)
 
         return when (phase) {
             Phase.WATCHING -> {
@@ -211,33 +252,72 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
     }
 
     fun onFaceResult(face: FaceObservation?, nowMs: Long): Action {
-        val lying = LyingJudge.isLying(lastOrientation, face, config)
+        val verdict = LyingJudge.verdict(lastOrientation, face, config)
         return when {
-            phase == Phase.CHECKING -> if (lying) {
-                strictLock = !lastOrientation.pose.isSuspicious
-                lastCaughtMs = nowMs
-                enter(Phase.ALARMING, nowMs)
-                lastLockCheckMs = nowMs
-                Action.START_ALARM
-            } else {
-                enterCooldown(nowMs)
-                Action.NONE
+            phase == Phase.CHECKING -> when (verdict) {
+                Verdict.LYING -> lock(LockReason.CAMERA_CONFIRMED, nowMs)
+                Verdict.NOT_LYING -> {
+                    unconfirmedSinceMs = null
+                    enterCooldown(nowMs)
+                    Action.NONE
+                }
+                Verdict.NO_EVIDENCE -> onNoEvidence(nowMs)
             }
 
             phase == Phase.ALARMING && lockRecheckInFlight -> {
                 lockRecheckInFlight = false
                 lastLockCheckMs = nowMs
-                if (lying) {
-                    lastCaughtMs = nowMs
-                    Action.NONE // still lying: stay locked
-                } else {
+                if (verdict == Verdict.NOT_LYING) {
                     enterCooldown(nowMs) // head is upright again: unlock
                     Action.STOP_ALARM
+                } else {
+                    lastCaughtMs = nowMs
+                    Action.NONE // still lying, or can't tell: stay locked (bounded by maxLock)
                 }
             }
 
             // Late, duplicate or unexpected results (e.g. after a screen-off) are ignored.
             else -> Action.NONE
+        }
+    }
+
+    /** The camera saw nothing usable. Decide from how strong the gravity evidence is. */
+    private fun onNoEvidence(nowMs: Long): Action = when (LyingJudge.evidence(lastOrientation, config)) {
+        Evidence.STRONG -> lock(LockReason.STRONG_POSE, nowMs)
+        Evidence.MEDIUM -> {
+            val since = unconfirmedSinceMs ?: nowMs.also { unconfirmedSinceMs = it }
+            if (nowMs - since >= config.unconfirmedLockMs) {
+                lock(LockReason.PERSISTENT_SUSPICION, nowMs)
+            } else {
+                enterCooldown(nowMs, config.noEvidenceCooldownMs)
+                Action.NONE
+            }
+        }
+        Evidence.WEAK, Evidence.NONE -> {
+            enterCooldown(nowMs)
+            Action.NONE
+        }
+    }
+
+    private fun lock(reason: LockReason, nowMs: Long): Action {
+        val previous = lastCaughtMs
+        lastLockWasRepeat = previous != null && nowMs - previous in 0 until config.relockWindowMs
+        lastLockReason = reason
+        strictLock = !lastOrientation.pose.isSuspicious
+        lastCaughtMs = nowMs
+        unconfirmedSinceMs = null
+        enter(Phase.ALARMING, nowMs)
+        lastLockCheckMs = nowMs
+        return Action.START_ALARM
+    }
+
+    private fun trackSuspicion(pose: Pose, nowMs: Long) {
+        if (pose.isSuspicious) {
+            val last = lastSuspiciousMs
+            if (last != null && nowMs - last > config.unconfirmedResetGapMs) unconfirmedSinceMs = null
+            lastSuspiciousMs = nowMs
+        } else if (pose != Pose.UNKNOWN) {
+            unconfirmedSinceMs = null // the user is holding the phone like someone sitting up
         }
     }
 
@@ -270,12 +350,11 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         phaseStartedMs = nowMs
     }
 
-    private fun enterCooldown(nowMs: Long) {
+    private fun enterCooldown(nowMs: Long, durationMs: Long = config.cooldownMs) {
         enter(Phase.COOLDOWN, nowMs)
         // Saturating add: a timestamp near Long.MAX_VALUE must not wrap around to negative,
         // which would silently skip the cooldown.
-        cooldownUntilMs =
-            if (nowMs > Long.MAX_VALUE - config.cooldownMs) Long.MAX_VALUE else nowMs + config.cooldownMs
+        cooldownUntilMs = if (nowMs > Long.MAX_VALUE - durationMs) Long.MAX_VALUE else nowMs + durationMs
     }
 
     /** Time since [startMs]; a clock that jumped backwards counts as zero. */

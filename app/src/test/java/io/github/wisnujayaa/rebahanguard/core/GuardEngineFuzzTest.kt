@@ -141,7 +141,7 @@ class GuardEngineFuzzTest {
             )
             if (wasLocked && engine.phase == Phase.COOLDOWN) {
                 // A lock re-check may only unlock when the camera no longer sees a lying head.
-                check(!LyingJudge.isLying(engine.lastOrientation, face, config), "unlocked while lying")
+                check(LyingJudge.verdict(engine.lastOrientation, face, config) == Verdict.NOT_LYING, "unlocked without seeing the user upright")
             }
         }
 
@@ -169,8 +169,10 @@ class GuardEngineFuzzTest {
                 }
                 Action.START_ALARM -> {
                     check(fromFaceResult, "alarm started without a camera check")
-                    check(face != null && face.isValid, "alarm started from an invalid face")
-                    check(face!!.faceWidthRatio >= config.minFaceWidthRatio, "alarm from a distant face")
+                    // Either the camera confirmed it, or gravity alone is strong/persistent
+                    // enough — never a lock on a pose that isn't a lying pose.
+                    val confirmed = LyingJudge.verdict(engine.lastOrientation, face, config) == Verdict.LYING
+                    check(confirmed || engine.lastOrientation.pose.isSuspicious, "locked without evidence")
                     check(!alarmOn, "alarm started twice")
                     alarmOn = true
                     alarmSince = now

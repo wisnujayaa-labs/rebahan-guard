@@ -63,6 +63,42 @@ The math uses only absolute angles, so it doesn't depend on sign conventions (fr
 
 **Strict mode** (optional) also checks with the camera while the phone is upright. Since sitting up doesn't change an upright phone's pose, alarms in this mode ring in 5-second bursts with a camera re-check in between, and stop as soon as the head is upright again.
 
+### Step 2½ — When the camera can't see you
+
+Real-world testing showed the camera often fails exactly when it matters (dark room, face half
+in a pillow, phone too close). Treating "no face" as "not lying" made that the biggest loophole,
+so the decision now weighs **how strong the gravity evidence is**:
+
+| Gravity evidence | Camera sees a lying head | Camera sees nothing usable |
+|---|---|---|
+| **Strong**: screen clearly facing the floor (< −30°) | 🔒 lock | 🔒 lock anyway (nobody uses a phone like that sitting up) |
+| **Medium**: slightly tilted, or sideways | 🔒 lock | 🔁 re-check every ~20 s; still suspicious after 2 min → 🔒 lock |
+| **Weak**: upright (strict mode only) | 🔒 lock | ✅ no lock |
+
+A visible, upright head always wins ("sitting"). The camera side was improved too: ML Kit
+`ACCURATE` mode, smaller minimum face, a 6-second window, and a **ring light**: if the first
+frames are dark, the screen briefly turns full-brightness white to light the user's face. Every
+check records *why* it ended (too dark, no face, face too small, model not ready…) so problems are
+measured, not guessed.
+
+### Locking, warning, and the way out
+
+- First catch: a 10-second "sit up now" banner, then a full-screen lock above every app with a
+  rotating reminder about studying. Repeat offences within 10 minutes lock immediately.
+- The lock lifts when the sensors see the user sitting up; it never lasts more than 5 minutes,
+  phone calls are never blocked, and an emergency button always opens the dialer.
+- **Trusted partner.** Switching the guard off is done by someone else:
+  - **Authenticator (TOTP, RFC 6238)**: the partner scans a QR code with Google Authenticator.
+    The secret is imported into the **Android Keystore as a non-exportable key**, the QR screen is
+    `FLAG_SECURE`, so the owner can verify codes but never produce them.
+  - **PIN / password** typed by the partner, stored as a salted **PBKDF2** hash.
+  - 5 wrong tries → 5-minute lockout (monotonic clock).
+  - Partner unreachable: a 30-minute in-app wait plus typing a long confession about choosing
+    lying down over studying.
+- **Commitment** (1–12 h) and a **bedtime schedule** make the guard impossible to switch off with
+  one tap; clock changes can't shorten them, and interruptions are counted and shown.
+- **Stats**: nightly streak, time locked, and a weekly report to send to the partner.
+
 ### Step 3 — A testable state machine
 
 ```mermaid
@@ -88,7 +124,11 @@ app/src/main/java/io/github/wisnujayaa/rebahanguard/
 │   ├── Pose.kt           #   gravity vector → Pose
 │   ├── SensorInput.kt    #   input sanitising, lock-screen rule, accelerometer filter
 │   ├── Debouncer.kt      #   "true for N ms" filter
-│   ├── LyingJudge.kt     #   sensor fusion: pose + face → head tilt → lying?
+│   ├── LyingJudge.kt     #   sensor fusion → verdict + evidence tier
+│   ├── Partner.kt        #   TOTP (RFC 6238), Base32, PBKDF2 PIN hash, attempt limiter
+│   ├── Commitment.kt     #   tamper-proof commitment, emergency stop, lock messages
+│   ├── ScheduleAndStats.kt # bedtime window, night records, streak, weekly report
+│   ├── CheckReport.kt    #   why a camera check ended the way it did
 │   ├── Calibrator.kt     #   learns the personal lying threshold from two recordings
 │   ├── AlarmSoundPolicy.kt # validates the chosen alarm sound URI
 │   └── GuardEngine.kt    #   state machine, emits Actions
@@ -152,6 +192,16 @@ All decision logic is pure Kotlin, so it is tested on the JVM in well under a se
 - [ ] Some OEM battery savers (Xiaomi, Oppo, vivo) may kill the service — whitelist the app
 - [ ] Schedule (only active at night), statistics of "caught" events
 - [ ] Learn the threshold from more than one feature (e.g. add head pitch) — a small logistic regression
+
+## Releases
+
+Signed APKs are published on the [Releases page](../../releases). Pushing a tag such as `v1.4.0`
+runs `release.yml`, which decodes the release key from GitHub Secrets into a temporary file,
+builds a non-debuggable, signed APK and attaches it to a GitHub Release. The release key never
+enters the repository.
+
+> The debug builds from the Actions tab are signed with a different (public) key. Uninstall a
+> debug build before installing a release build.
 
 ## Build & install
 

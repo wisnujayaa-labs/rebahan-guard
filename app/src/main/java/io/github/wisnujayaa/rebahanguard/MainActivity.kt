@@ -10,6 +10,7 @@ import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -54,6 +55,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,18 +75,26 @@ import io.github.wisnujayaa.rebahanguard.core.AlarmSoundPolicy
 import io.github.wisnujayaa.rebahanguard.core.Calibrator
 import io.github.wisnujayaa.rebahanguard.core.Commitment
 import io.github.wisnujayaa.rebahanguard.core.EmergencyStop
+import io.github.wisnujayaa.rebahanguard.core.EmergencyStopRules
+import io.github.wisnujayaa.rebahanguard.core.Schedule
 import io.github.wisnujayaa.rebahanguard.core.Phase
 import io.github.wisnujayaa.rebahanguard.core.Pose
 import io.github.wisnujayaa.rebahanguard.core.SensorInput
 import io.github.wisnujayaa.rebahanguard.service.AlarmPlayer
 import io.github.wisnujayaa.rebahanguard.service.CommitmentStore
+import io.github.wisnujayaa.rebahanguard.service.PartnerStore
+import io.github.wisnujayaa.rebahanguard.service.Protection
 import io.github.wisnujayaa.rebahanguard.service.GuardService
 import io.github.wisnujayaa.rebahanguard.service.GuardSettings
 import io.github.wisnujayaa.rebahanguard.service.GuardStatus
 import io.github.wisnujayaa.rebahanguard.service.GuardStatusStore
+import io.github.wisnujayaa.rebahanguard.ui.CheckHistory
 import io.github.wisnujayaa.rebahanguard.ui.Night
+import io.github.wisnujayaa.rebahanguard.ui.PartnerCodeField
+import io.github.wisnujayaa.rebahanguard.ui.PartnerSection
 import io.github.wisnujayaa.rebahanguard.ui.RebahanGuardTheme
 import io.github.wisnujayaa.rebahanguard.ui.ScreenAngleDial
+import io.github.wisnujayaa.rebahanguard.ui.StatsSection
 import io.github.wisnujayaa.rebahanguard.ui.previewAlarmSound
 import io.github.wisnujayaa.rebahanguard.ui.recordScreenElevations
 import io.github.wisnujayaa.rebahanguard.ui.rememberLiveScreenElevation
@@ -106,13 +116,23 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         setContent {
-            RebahanGuardTheme {
-                // Surface sets LocalContentColor: every Text without an explicit color inherits
-                // the light night-text color instead of Compose's default black.
-                Surface(modifier = Modifier.fillMaxSize(), color = Night.Ink, contentColor = Night.Text) {
-                    GuardScreen()
-                }
+            AppSurface {
+                GuardScreen()
             }
+        }
+    }
+}
+
+/**
+ * The app's root: theme + a Surface that sets LocalContentColor, so every Text without an
+ * explicit color inherits the light night-text color instead of Compose's default black.
+ * Screenshot tests render through this too, so a regression here shows up in the images.
+ */
+@Composable
+internal fun AppSurface(content: @Composable () -> Unit) {
+    RebahanGuardTheme {
+        Surface(modifier = Modifier.fillMaxSize(), color = Night.Ink, contentColor = Night.Text) {
+            content()
         }
     }
 }
@@ -126,17 +146,24 @@ private fun GuardScreen() {
     var cameraDenied by remember { mutableStateOf(false) }
     var needsOverlayPermission by remember { mutableStateOf(false) }
     var confirmCommitment by remember { mutableStateOf(false) }
-    var showEmergencyStop by remember { mutableStateOf(false) }
+    var showStopFlow by remember { mutableStateOf(false) }
 
-    // Commitment state is re-read regularly: it ends on its own when the time is up.
+    // Protection state is re-read regularly (not on every frame: the dial recomposes often).
     var commitmentLeftMs by remember { mutableLongStateOf(CommitmentStore.remainingMs(context)) }
-    LaunchedEffect(status.running) {
+    var hasPartner by remember { mutableStateOf(PartnerStore.hasPartner(context)) }
+    var scheduleActive by remember { mutableStateOf(false) }
+    var statsRefresh by remember { mutableIntStateOf(0) }
+    LaunchedEffect(status.running, settings.schedule) {
         while (true) {
             commitmentLeftMs = CommitmentStore.remainingMs(context)
+            hasPartner = PartnerStore.hasPartner(context)
+            scheduleActive = settings.schedule.enabled && settings.schedule.isWithin(Protection.minuteOfDay())
+            statsRefresh++
             delay(15_000)
         }
     }
     val committed = commitmentLeftMs > 0
+    val isProtected = committed || hasPartner || scheduleActive
 
     fun update(newSettings: GuardSettings) {
         settings = newSettings.sanitized()
@@ -185,10 +212,12 @@ private fun GuardScreen() {
         if (missing.isEmpty()) launchGuard(beginCommitment) else permissionLauncher.launch(missing.toTypedArray())
     }
 
-    // During a commitment, opening the app is enough to bring the guard back (after a restart,
-    // a force stop or a battery saver).
-    LaunchedEffect(status.running, committed) {
-        if (committed && !status.running && hasPermissions() && overlayReady()) {
+    // While protected, opening the app is enough to bring the guard back (after a restart, a
+    // force stop or a battery saver).
+    LaunchedEffect(status.running, committed, hasPartner, scheduleActive) {
+        val wasRunning = CommitmentStore.isSessionOpen(context)
+        val shouldRun = committed || ((hasPartner || scheduleActive) && wasRunning)
+        if (shouldRun && !status.running && hasPermissions() && overlayReady()) {
             GuardService.start(context, settings)
         }
     }
@@ -214,23 +243,32 @@ private fun GuardScreen() {
 
         StatusLines(status)
 
-        if (committed) CommitmentBanner(commitmentLeftMs)
+        if (isProtected) {
+            ProtectionBanner(
+                committed = committed,
+                commitmentLeftMs = commitmentLeftMs,
+                partnerName = if (hasPartner) PartnerStore.name(context) ?: "Temanmu" else null,
+                schedule = settings.schedule.takeIf { scheduleActive },
+            )
+        }
 
         when {
-            committed && showEmergencyStop -> EmergencyStopPanel(
+            status.running && isProtected && showStopFlow -> StopFlow(
+                hasPartner = hasPartner,
                 onStopped = {
+                    CommitmentStore.markLegitStop(context)
                     CommitmentStore.clear(context)
                     commitmentLeftMs = 0
-                    showEmergencyStop = false
+                    showStopFlow = false
                     GuardService.stop(context)
                 },
-                onCancel = { showEmergencyStop = false },
+                onCancel = { showStopFlow = false },
             )
 
-            committed && status.running -> TextButton(
-                onClick = { showEmergencyStop = true },
+            status.running && isProtected -> TextButton(
+                onClick = { showStopFlow = true },
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Matikan darurat", color = Night.Muted) }
+            ) { Text("Matikan penjaga", color = Night.Muted) }
 
             status.running -> OutlinedButton(
                 onClick = { GuardService.stop(context) },
@@ -273,7 +311,22 @@ private fun GuardScreen() {
             )
         }
 
+        val powerManager = remember { context.getSystemService(Context.POWER_SERVICE) as PowerManager }
+        if (!powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+            Notice(
+                "Penghemat baterai bisa diam-diam mematikan penjaga di malam hari. Izinkan Rebahan " +
+                    "Guard berjalan tanpa batasan baterai.",
+                action = "Izinkan tanpa batasan baterai" to { requestIgnoreBatteryOptimizations(context) },
+            )
+        }
+
+        StatsSection(statsRefresh)
+
+        PartnerSection(editable = true, onChanged = { hasPartner = PartnerStore.hasPartner(context) })
+
         SettingsPanel(settings, editable, committed, ::update)
+
+        CheckHistory(status.checks)
 
         Text(
             "Gambar kamera dianalisis di HP lalu dibuang. Aplikasi ini tidak punya izin internet.",
@@ -293,8 +346,9 @@ private fun GuardScreen() {
             text = {
                 Text(
                     "Sampai pukul $until, penjaga tidak bisa dimatikan begitu saja. Jalan keluarnya " +
-                        "hanya matikan darurat: tunggu 2 menit lalu ketik sebuah kalimat. Telepon " +
-                        "dan tombol Darurat di layar kunci tetap selalu bisa dipakai.",
+                        "hanya kode dari teman pengawasmu, atau jalur darurat yang lambat (menunggu " +
+                        "lalu mengetik sebuah pengakuan panjang). Telepon dan tombol Darurat di layar " +
+                        "kunci tetap selalu bisa dipakai.",
                 )
             },
             confirmButton = {
@@ -328,23 +382,65 @@ private fun Notice(text: String, action: Pair<String, () -> Unit>) {
 // ------------------------------------------------------------------------------ commitment
 
 @Composable
-private fun CommitmentBanner(leftMs: Long) {
+private fun ProtectionBanner(committed: Boolean, commitmentLeftMs: Long, partnerName: String?, schedule: Schedule?) {
     val context = LocalContext.current
-    val until = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(System.currentTimeMillis() + leftMs))
-    val interruptions = remember(leftMs) { CommitmentStore.interruptions(context) }
-    val emergencies = remember(leftMs) { CommitmentStore.emergencies(context) }
+    val until = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(System.currentTimeMillis() + commitmentLeftMs))
+    val interruptions = remember(commitmentLeftMs) { CommitmentStore.interruptions(context) }
+    val emergencies = remember(commitmentLeftMs) { CommitmentStore.emergencies(context) }
+    val reasons = buildList {
+        if (committed) add("berkomitmen sampai pukul $until")
+        if (partnerName != null) add("kuncinya dipegang $partnerName")
+        if (schedule != null) add("jam tidur ${Schedule.format(schedule.startMinute)}–${Schedule.format(schedule.endMinute)}")
+    }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("Berkomitmen sampai pukul $until.", style = MaterialTheme.typography.titleMedium, color = Night.Lamp)
+        Text(
+            "Terkunci: ${reasons.joinToString(", ")}.",
+            style = MaterialTheme.typography.titleMedium,
+            color = Night.Lamp,
+        )
         val notes = buildList {
-            if (interruptions > 0) add("penjaga terputus $interruptions kali")
+            if (interruptions > 0) add("penjaga terputus atau jam diubah $interruptions kali")
             if (emergencies > 0) add("tombol Darurat dipakai $emergencies kali")
         }
         if (notes.isNotEmpty()) {
             Text(
-                "Selama komitmen ini: ${notes.joinToString(", ")}.",
+                "Tercatat: ${notes.joinToString(", ")}.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Night.Muted,
             )
+        }
+    }
+}
+
+/** Switching off a protected guard: the partner's code, or the slow emergency path. */
+@Composable
+private fun StopFlow(hasPartner: Boolean, onStopped: () -> Unit, onCancel: () -> Unit) {
+    val context = LocalContext.current
+    var emergency by remember { mutableStateOf(!hasPartner) }
+    if (emergency) {
+        EmergencyStopPanel(hasPartner = hasPartner, onStopped = onStopped, onCancel = onCancel)
+        return
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(28.dp))
+            .background(Night.Dusk.copy(alpha = 0.7f))
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        val name = PartnerStore.name(context) ?: "temanmu"
+        Text("Minta izin ke $name", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Ceritakan kenapa kamu mau mematikan penjaga, lalu minta dia mengetik kodenya di sini " +
+                "atau membacakan kode Authenticator-nya.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Night.Muted,
+        )
+        PartnerCodeField(actionLabel = "Matikan penjaga", onVerified = onStopped)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { emergency = true }) { Text("$name tidak bisa dihubungi") }
+            TextButton(onClick = onCancel) { Text("Tetap menyala") }
         }
     }
 }
@@ -355,7 +451,7 @@ private fun CommitmentBanner(leftMs: Long) {
  */
 @Suppress("DEPRECATION")
 @Composable
-private fun EmergencyStopPanel(onStopped: () -> Unit, onCancel: () -> Unit) {
+private fun EmergencyStopPanel(hasPartner: Boolean, onStopped: () -> Unit, onCancel: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var startedAt by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
@@ -377,9 +473,11 @@ private fun EmergencyStopPanel(onStopped: () -> Unit, onCancel: () -> Unit) {
         }
     }
 
+    val waitMs = EmergencyStopRules.waitMs(hasPartner)
     val waited = (now - startedAt).coerceAtLeast(0)
-    val leftSec = ((EmergencyStop.WAIT_MS - waited).coerceAtLeast(0) + 999) / 1000
-    val ready = EmergencyStop.canStop(waited, typed)
+    val leftSec = ((waitMs - waited).coerceAtLeast(0) + 999) / 1000
+    val ready = EmergencyStop.canStop(waited, typed, hasPartner)
+    val correct = EmergencyStop.correctWords(typed)
 
     Column(
         Modifier
@@ -389,28 +487,30 @@ private fun EmergencyStopPanel(onStopped: () -> Unit, onCancel: () -> Unit) {
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Matikan darurat", style = MaterialTheme.typography.titleMedium)
+        Text("Jalur darurat", style = MaterialTheme.typography.titleMedium)
         Text(
             if (leftSec > 0) {
                 "Tunggu ${leftSec / 60}:${"%02d".format(leftSec % 60)} lagi dengan layar ini tetap terbuka. " +
-                    "Kalau kamu keluar dari aplikasi, hitungannya mulai dari awal."
+                    "Kalau kamu keluar dari aplikasi, hitungannya mulai dari awal. Selama menunggu, " +
+                    "pikirkan lagi: apa yang seharusnya kamu pelajari malam ini?"
             } else {
                 "Waktu tunggu selesai."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = Night.Muted,
         )
-        Text("Ketik kalimat ini:", style = MaterialTheme.typography.bodyMedium)
+        Text("Ketik pengakuan ini, kata demi kata:", style = MaterialTheme.typography.bodyMedium)
         Text("\u201C${EmergencyStop.PHRASE}\u201D", style = MaterialTheme.typography.bodyLarge, color = Night.Lamp)
         OutlinedTextField(
             value = typed,
-            onValueChange = { typed = it.take(200) },
+            onValueChange = { typed = it.take(400) },
             modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
+            minLines = 3,
+            supportingText = { Text("$correct dari ${EmergencyStop.wordCount} kata benar") },
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onStopped, enabled = ready, shape = CircleShape) { Text("Matikan penjaga") }
-            TextButton(onClick = onCancel) { Text("Tetap menyala") }
+            TextButton(onClick = onCancel) { Text("Tetap menyala dan belajar") }
         }
     }
 }
@@ -418,10 +518,13 @@ private fun EmergencyStopPanel(onStopped: () -> Unit, onCancel: () -> Unit) {
 // ------------------------------------------------------------------------------ status
 
 @Composable
-private fun StatusLines(status: GuardStatus) {
+internal fun StatusLines(status: GuardStatus) {
     val (headline, detail) = when {
         !status.running -> "Penjaga mati." to "Nyalakan sebelum tidur. Jarum di atas mengikuti HP-mu."
         !status.screenOn -> "Layar mati, penjaga ikut istirahat." to "Begitu layar menyala, pengawasan lanjut."
+        status.outsideSchedule -> "Di luar jam tidur." to "Penjaga menyala tapi istirahat sampai jadwalnya mulai."
+        status.phase == Phase.ALARMING && status.warningUntilElapsedMs > 0 ->
+            "Duduk sekarang." to "Kalau tetap rebahan, layar dikunci sebentar lagi."
         status.phase == Phase.WATCHING -> "Mengawasi." to "HP-mu ${poseLabel(status.pose)}."
         status.phase == Phase.CHECKING -> "Kamera sedang memastikan…" to "Hanya beberapa detik, gambar tidak disimpan."
         status.phase == Phase.ALARMING -> "Ketahuan rebahan." to "Layar terkunci sampai kamu duduk."
@@ -455,7 +558,7 @@ private fun StatusLines(status: GuardStatus) {
 
 /** One quiet panel; rows separated by hairlines instead of a stack of cards. */
 @Composable
-private fun SettingsPanel(
+internal fun SettingsPanel(
     settings: GuardSettings,
     editable: Boolean,
     committed: Boolean,
@@ -475,6 +578,8 @@ private fun SettingsPanel(
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp),
             )
         }
+        ScheduleRow(settings, editable, onChange)
+        Divider()
         CommitmentRow(settings, editable, onChange)
         Divider()
         LockRow(settings, editable, onChange)
@@ -486,6 +591,63 @@ private fun SettingsPanel(
         StrictRow(settings, editable, onChange)
         Divider()
         SoundRow(settings, editable, onChange)
+    }
+}
+
+@Composable
+private fun ScheduleRow(settings: GuardSettings, editable: Boolean, onChange: (GuardSettings) -> Unit) {
+    val sch = settings.schedule
+    var start by remember(sch.startMinute) { mutableStateOf(sch.startMinute / 30f) }
+    var end by remember(sch.endMinute) { mutableStateOf(sch.endMinute / 30f) }
+    val sliderColors = SliderDefaults.colors(
+        thumbColor = Night.Lamp,
+        activeTrackColor = Night.Lamp,
+        inactiveTrackColor = Night.Hairline,
+    )
+    SettingRow(
+        "Jadwal jam tidur",
+        trailing = {
+            Switch(
+                checked = sch.enabled,
+                onCheckedChange = { onChange(settings.copy(schedule = sch.copy(enabled = it))) },
+                enabled = editable,
+                colors = SwitchDefaults.colors(checkedThumbColor = Night.Ink, checkedTrackColor = Night.Lamp),
+            )
+        },
+    ) {
+        Text(
+            "Penjaga hanya bekerja di jam ini, dan selama jam ini tidak bisa dimatikan begitu " +
+                "saja. Nyalakan sekali, lalu biarkan menyala.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Night.Muted,
+        )
+        if (sch.enabled) {
+            Text(
+                "${Schedule.format(start.roundToInt() * 30)} sampai ${Schedule.format(end.roundToInt() * 30)}",
+                style = MaterialTheme.typography.titleSmall,
+                color = Night.Lamp,
+            )
+            Text("Mulai", style = MaterialTheme.typography.bodySmall, color = Night.Muted)
+            Slider(
+                value = start,
+                onValueChange = { start = it },
+                onValueChangeFinished = { onChange(settings.copy(schedule = sch.copy(startMinute = start.roundToInt() * 30))) },
+                valueRange = 0f..47f,
+                steps = 46,
+                enabled = editable,
+                colors = sliderColors,
+            )
+            Text("Selesai", style = MaterialTheme.typography.bodySmall, color = Night.Muted)
+            Slider(
+                value = end,
+                onValueChange = { end = it },
+                onValueChangeFinished = { onChange(settings.copy(schedule = sch.copy(endMinute = end.roundToInt() * 30))) },
+                valueRange = 0f..47f,
+                steps = 46,
+                enabled = editable,
+                colors = sliderColors,
+            )
+        }
     }
 }
 
@@ -816,6 +978,23 @@ private fun poseLabel(pose: Pose) = when (pose) {
     Pose.FACE_UP -> "tergeletak, layar ke atas"
     Pose.TILTED -> "agak miring"
     Pose.UNKNOWN -> "sedang dibaca sensornya"
+}
+
+@android.annotation.SuppressLint("BatteryLife") // a self-control app is exactly the use case
+private fun requestIgnoreBatteryOptimizations(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        Uri.parse("package:${context.packageName}"),
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        try {
+            context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e2: Exception) {
+            openAppSettings(context)
+        }
+    }
 }
 
 private fun openOverlaySettings(context: Context) {

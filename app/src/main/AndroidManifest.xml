@@ -23,6 +23,8 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Remind the user after a restart if a commitment is still running. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Ask to be exempt from battery optimisation, so the guard isn't killed at night. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- ML Kit's telemetry library would add these. Removing them means this app itself has no
          network access, so camera frames can never be sent out. (The face model runs inside

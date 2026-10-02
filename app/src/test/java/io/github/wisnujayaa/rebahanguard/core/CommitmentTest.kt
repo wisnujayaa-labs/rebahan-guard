@@ -71,24 +71,56 @@ class CommitmentTest {
 }
 
 class EmergencyStopTest {
+    private val alone = EmergencyStopRules.WAIT_ALONE_MS
+    private val partner = EmergencyStopRules.WAIT_WITH_PARTNER_MS
+
     @Test
-    fun needsBothTheWaitAndThePhrase() {
-        assertFalse(EmergencyStop.canStop(EmergencyStop.WAIT_MS - 1, EmergencyStop.PHRASE))
-        assertFalse(EmergencyStop.canStop(EmergencyStop.WAIT_MS, "aku mau tidur"))
-        assertTrue(EmergencyStop.canStop(EmergencyStop.WAIT_MS, EmergencyStop.PHRASE))
+    fun needsBothTheWaitAndTheWholeSentence() {
+        assertFalse(EmergencyStop.canStop(alone - 1, EmergencyStop.PHRASE, hasPartner = false))
+        assertFalse(EmergencyStop.canStop(alone, "saya mau tidur", hasPartner = false))
+        assertTrue(EmergencyStop.canStop(alone, EmergencyStop.PHRASE, hasPartner = false))
+    }
+
+    @Test
+    fun withAPartner_theWaitIsMuchLonger() {
+        assertFalse(EmergencyStop.canStop(alone, EmergencyStop.PHRASE, hasPartner = true))
+        assertFalse(EmergencyStop.canStop(partner - 1, EmergencyStop.PHRASE, hasPartner = true))
+        assertTrue(EmergencyStop.canStop(partner, EmergencyStop.PHRASE, hasPartner = true))
+    }
+
+    @Test
+    fun sentence_isAboutStudying_andLong() {
+        assertTrue(EmergencyStop.PHRASE.contains("belajar"))
+        assertTrue(EmergencyStop.wordCount >= 25)
     }
 
     @Test
     fun phrase_ignoresCaseSpacingAndPunctuation() {
-        assertTrue(EmergencyStop.phraseMatches("  Aku memilih REBAHAN   daripada tidur. "))
-        assertTrue(EmergencyStop.phraseMatches("aku memilih rebahan daripada tidur!"))
+        val messy = "  " + EmergencyStop.PHRASE.uppercase().replace(" ", "   ").replace(".", "!") + " "
+        assertTrue(EmergencyStop.phraseMatches(messy))
     }
 
     @Test
-    fun phrase_mustContainAllTheWords() {
+    fun phrase_mustContainAllTheWordsInOrder() {
         assertFalse(EmergencyStop.phraseMatches(""))
-        assertFalse(EmergencyStop.phraseMatches("aku memilih rebahan"))
-        assertFalse(EmergencyStop.phraseMatches("aku memilih tidur daripada rebahan"))
+        val words = EmergencyStop.PHRASE.split(" ")
+        assertFalse(EmergencyStop.phraseMatches(words.dropLast(1).joinToString(" ")))
+        assertFalse(EmergencyStop.phraseMatches(words.reversed().joinToString(" ")))
+    }
+
+    @Test
+    fun correctWords_countsTheMatchingPrefix() {
+        val words = EmergencyStop.PHRASE.split(" ")
+        assertEquals(0, EmergencyStop.correctWords(""))
+        assertEquals(3, EmergencyStop.correctWords(words.take(3).joinToString(" ")))
+        assertEquals(3, EmergencyStop.correctWords(words.take(3).joinToString(" ") + " salah ketik"))
+        assertEquals(EmergencyStop.wordCount, EmergencyStop.correctWords(EmergencyStop.PHRASE))
+    }
+
+    @Test
+    fun lockMessages_rotateSafely() {
+        for (i in -20L..20L) assertTrue(LockMessages.pick(i).isNotBlank())
+        assertTrue(LockMessages.ALL.any { it.contains("belajar") })
     }
 }
 

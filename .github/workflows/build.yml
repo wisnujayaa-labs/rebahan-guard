@@ -40,10 +40,8 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Unit tests (incl. fuzz tests)
-        run: ./gradlew testDebugUnitTest
-
-      # Build and publish the APK before lint, so a lint finding never blocks getting the app.
+      # Build and publish the APK first, so a failing test or lint finding never blocks
+      # getting the app (the run still turns red).
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
@@ -53,6 +51,18 @@ jobs:
           name: RebahanGuard-apk
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
+
+      # Runs every unit test (logic, fuzz, Robolectric) and records the UI screenshots.
+      - name: Unit tests + screenshots
+        run: ./gradlew recordRoborazziDebug
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: app/build/outputs/roborazzi/
+          retention-days: 14
 
       - name: Android lint
         run: ./gradlew lintDebug
@@ -64,7 +74,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob, xml.etree.ElementTree as ET
-          for path in glob.glob("app/build/reports/lint-results-debug.xml") + glob.glob("app/build/intermediates/lint_intermediate_text_report/**/*.xml", recursive=True):
+          for path in glob.glob("app/build/reports/lint-results-debug.xml"):
               try:
                   root = ET.parse(path).getroot()
               except Exception as e:
@@ -77,6 +87,20 @@ jobs:
                   line = loc.get("line", "1") if loc is not None else "1"
                   msg = f'[{issue.get("id")}] {issue.get("message")}'.replace("\n", " ")
                   print(f"::{level} file={file},line={line}::{msg}")
+          PY
+
+      # Turn failing tests into annotations as well.
+      - name: Annotate test failures
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          for path in glob.glob("app/build/test-results/**/*.xml", recursive=True):
+              root = ET.parse(path).getroot()
+              for case in root.iter("testcase"):
+                  for f in list(case.findall("failure")) + list(case.findall("error")):
+                      msg = (f.get("message") or f.text or "").replace("\n", " ")[:900]
+                      print(f"::error title={case.get('classname')}.{case.get('name')}::{msg}")
           PY
 
       - name: Upload test and lint reports

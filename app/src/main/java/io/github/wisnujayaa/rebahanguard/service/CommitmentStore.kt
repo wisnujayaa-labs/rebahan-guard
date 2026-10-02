@@ -16,6 +16,7 @@ object CommitmentStore {
     private const val KEY_INTERRUPTIONS = "interruptions"
     private const val KEY_SESSION_OPEN = "session_open"
     private const val KEY_EMERGENCIES = "emergencies"
+    private const val KEY_LEGIT_STOP = "legit_stop"
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -79,13 +80,28 @@ object CommitmentStore {
         val count = InterruptionLedger.onGuardStart(
             previousCount = interruptions(context),
             sessionWasOpen = p.getBoolean(KEY_SESSION_OPEN, false),
-            commitmentActive = isActive(context),
+            commitmentActive = Protection.isProtected(context),
         )
-        p.edit().putInt(KEY_INTERRUPTIONS, count).putBoolean(KEY_SESSION_OPEN, true).commit()
+        p.edit().putInt(KEY_INTERRUPTIONS, count).putBoolean(KEY_SESSION_OPEN, true).putBoolean(KEY_LEGIT_STOP, false).commit()
     }
 
-    /** The guard stopped through a legitimate path (no commitment, or it ended / was released). */
-    fun onGuardStoppedCleanly(context: Context) {
-        prefs(context).edit().putBoolean(KEY_SESSION_OPEN, false).apply()
+    fun isSessionOpen(context: Context): Boolean = prefs(context).getBoolean(KEY_SESSION_OPEN, false)
+
+    /** The partner code or the emergency path was used: the next stop is a legitimate one. */
+    fun markLegitStop(context: Context) {
+        prefs(context).edit().putBoolean(KEY_LEGIT_STOP, true).commit()
+    }
+
+    /** Called when the guard stops. Closes the session if the stop was allowed. */
+    fun onGuardStopped(context: Context) {
+        val p = prefs(context)
+        if (p.getBoolean(KEY_LEGIT_STOP, false) || !Protection.isProtected(context)) {
+            p.edit().putBoolean(KEY_SESSION_OPEN, false).putBoolean(KEY_LEGIT_STOP, false).apply()
+        }
+    }
+
+    /** The phone's clock or time zone was changed while protected: worth showing the user. */
+    fun recordClockChange(context: Context) {
+        prefs(context).edit().putInt(KEY_INTERRUPTIONS, (interruptions(context) + 1).coerceAtMost(9_999)).apply()
     }
 }

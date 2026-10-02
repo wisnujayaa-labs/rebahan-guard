@@ -248,14 +248,14 @@ class GuardEngineTest {
     }
 
     @Test
-    fun relock_stillNeedsTheCamera_neverLocksOnGravityAlone() {
+    fun relock_onAMediumPose_stillNeedsTheCamera() {
         val e = GuardEngine(config)
-        e.triggerCheck(Pose.FACE_DOWN, 0)
-        e.onFaceResult(lyingFace, 10_000)
+        e.triggerCheck(Pose.SIDEWAYS, 0)
+        e.onFaceResult(FaceObservation(0.4f, 3f), 10_000) // sideways phone, upright face: lying on side
         e.onScreenOff()
-        e.onPose(Pose.FACE_DOWN, 20_000)
-        e.onPose(Pose.FACE_DOWN, 23_000)
-        assertEquals(Action.NONE, e.onFaceResult(null, 23_500)) // no face: no lock
+        e.onPose(Pose.SIDEWAYS, 20_000)
+        e.onPose(Pose.SIDEWAYS, 23_000)
+        assertEquals(Action.NONE, e.onFaceResult(null, 23_500)) // no face yet: not enough
         assertEquals(Phase.COOLDOWN, e.phase)
     }
 
@@ -275,9 +275,9 @@ class GuardEngineTest {
     }
 
     @Test
-    fun garbageFaceResult_neverAlarms() {
+    fun garbageFaceResult_onAMediumPose_doesNotLockImmediately() {
         val e = GuardEngine(config)
-        e.triggerCheck(Pose.FACE_DOWN, 0)
+        e.triggerCheck(Pose.SIDEWAYS, 0)
         assertEquals(Action.NONE, e.onFaceResult(FaceObservation(Float.NaN, 0f), 10_100))
         assertEquals(Phase.COOLDOWN, e.phase)
     }
@@ -334,9 +334,9 @@ class GuardEngineTest {
         // A negative check right at the edge must still respect the cooldown (no wrap-around).
         val e2 = GuardEngine(config)
         val t = Long.MAX_VALUE - 20_000
-        e2.triggerCheck(Pose.FACE_DOWN, t)
-        e2.onFaceResult(null, t + 10_000)
-        assertEquals(Action.NONE, e2.onPose(Pose.FACE_DOWN, t + 15_000))
+        e2.triggerCheck(Pose.SIDEWAYS, t)
+        e2.onFaceResult(FaceObservation(0.4f, 88f), t + 10_000) // clearly sitting
+        assertEquals(Action.NONE, e2.onPose(Pose.SIDEWAYS, t + 15_000))
         assertEquals(Phase.COOLDOWN, e2.phase)
     }
 
@@ -417,5 +417,103 @@ class GuardEngineTest {
         assertEquals(Action.STOP_ALARM, e.onScreenOff())
         assertEquals(false, e.lockRecheckInFlight)
         assertEquals(Action.NONE, e.onFaceResult(sidewaysHead, 15_800)) // late result ignored
+    }
+
+    // ------------------------------------------------------------ tiered evidence (no face)
+
+    private val strongDown = Orientation(Pose.FACE_DOWN, -60f, 0f) // phone held overhead
+    private val weakDown = Orientation(Pose.FACE_DOWN, -15f, 0f)   // propped up, slightly tilted
+
+    private fun GuardEngine.checkWith(o: Orientation, from: Long): Long {
+        onPose(o, from)
+        assertEquals(Action.START_CAMERA_CHECK, onPose(o, from + config.triggerDelayMs))
+        return from + config.triggerDelayMs
+    }
+
+    @Test
+    fun strongPose_withoutAFace_locksAnyway() {
+        val e = GuardEngine(config)
+        val t = e.checkWith(strongDown, 0)
+        assertEquals(Action.START_ALARM, e.onFaceResult(null, t + 500))
+        assertEquals(LockReason.STRONG_POSE, e.lastLockReason)
+    }
+
+    @Test
+    fun sidewaysPhone_withAClearlySittingFace_doesNotLock() {
+        val e = GuardEngine(config)
+        val o = Orientation(Pose.SIDEWAYS, 0f, 90f)
+        val t = e.checkWith(o, 0)
+        assertEquals(Action.NONE, e.onFaceResult(FaceObservation(0.4f, 88f), t + 500))
+    }
+
+    @Test
+    fun mediumPose_repeatedlyWithoutAFace_locksAfterTwoMinutes() {
+        val e = GuardEngine(config)
+        var t = e.checkWith(weakDown, 0)
+        assertEquals(Action.NONE, e.onFaceResult(null, t)) // first failed check: start the clock
+        val first = t
+        var locked = false
+        while (t < first + 200_000 && !locked) {
+            t += 1_000
+            when (e.onPose(weakDown, t)) {
+                Action.START_CAMERA_CHECK -> {
+                    if (e.onFaceResult(null, t + 1) == Action.START_ALARM) locked = true
+                }
+                else -> Unit
+            }
+        }
+        assertTrue("never locked", locked)
+        assertTrue("locked too early at ${t - first}", t - first >= config.unconfirmedLockMs)
+        assertEquals(LockReason.PERSISTENT_SUSPICION, e.lastLockReason)
+    }
+
+    @Test
+    fun mediumPose_suspicionIsForgotten_whenTheUserSitsUp() {
+        val e = GuardEngine(config)
+        var t = e.checkWith(weakDown, 0)
+        e.onFaceResult(null, t)
+        t += 60_000
+        e.onPose(Pose.UPRIGHT, t) // sat up for a moment
+        t = e.checkWith(weakDown, t + 1)
+        e.onFaceResult(null, t) // a fresh suspicion starts here, not 70 s ago
+        t = e.checkWith(weakDown, t + 70_000)
+        // Only ~80 s of fresh suspicion: not enough to lock without a face.
+        assertEquals(Action.NONE, e.onFaceResult(null, t))
+    }
+
+    @Test
+    fun mediumPose_aVisibleSittingFace_resetsTheSuspicion() {
+        val e = GuardEngine(config)
+        val o = Orientation(Pose.SIDEWAYS, 0f, 90f)
+        var t = e.checkWith(o, 0)
+        e.onFaceResult(null, t)
+        t = e.checkWith(o, t + 70_000)
+        e.onFaceResult(FaceObservation(0.4f, 88f), t) // seen sitting: clears the suspicion
+        t = e.checkWith(o, t + 70_000)
+        assertEquals(Action.NONE, e.onFaceResult(null, t))
+    }
+
+    @Test
+    fun weakPose_withoutAFace_neverLocks() {
+        val e = GuardEngine(config.copy(strictMode = true))
+        var t = 0L
+        repeat(30) {
+            t = e.checkWith(Orientation.of(Pose.UPRIGHT), t + 1)
+            assertEquals(Action.NONE, e.onFaceResult(null, t))
+            t += 70_000
+        }
+    }
+
+    @Test
+    fun repeatLocks_areMarked_forSkippingTheWarning() {
+        val e = GuardEngine(config)
+        e.triggerCheck(Pose.FACE_DOWN, 0)
+        e.onFaceResult(lyingFace, 10_000)
+        assertEquals(false, e.lastLockWasRepeat)
+        e.onScreenOff()
+        e.onPose(Pose.FACE_DOWN, 20_000)
+        e.onPose(Pose.FACE_DOWN, 23_000)
+        e.onFaceResult(lyingFace, 23_500)
+        assertEquals(true, e.lastLockWasRepeat)
     }
 }

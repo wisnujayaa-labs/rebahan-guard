@@ -157,4 +157,33 @@ class LyingJudgeTest {
             assertTrue("roll=$roll -> $d", d >= 0f && d <= 90f)
         }
     }
+
+    // ------------------------------------------------------------ verdict and evidence
+
+    @Test
+    fun verdict_noUsableFace_isNoEvidence() {
+        val o = Orientation.of(Pose.SIDEWAYS)
+        for (face in listOf(null, FaceObservation(Float.NaN, 0f), FaceObservation(0.05f, 0f))) {
+            assertEquals(Verdict.NO_EVIDENCE, LyingJudge.verdict(o, face, config))
+        }
+    }
+
+    @Test
+    fun verdict_lyingSittingAndUndecidable() {
+        assertEquals(Verdict.LYING, LyingJudge.verdict(Orientation.of(Pose.SIDEWAYS), FaceObservation(0.4f, 3f), config))
+        assertEquals(Verdict.NOT_LYING, LyingJudge.verdict(Orientation.of(Pose.SIDEWAYS), FaceObservation(0.4f, 88f), config))
+        assertEquals(Verdict.NOT_LYING, LyingJudge.verdict(Orientation.of(Pose.FACE_UP), FaceObservation(0.4f, 0f), config))
+        // Diagonal phone: can't tell sitting from lying → no evidence, not "sitting".
+        assertEquals(Verdict.NO_EVIDENCE, LyingJudge.verdict(Orientation(Pose.TILTED, 10f, 45f), FaceObservation(0.4f, 0f), config))
+    }
+
+    @Test
+    fun evidence_tiers() {
+        assertEquals(Evidence.STRONG, LyingJudge.evidence(Orientation(Pose.FACE_DOWN, -60f, 0f), config))
+        assertEquals(Evidence.MEDIUM, LyingJudge.evidence(Orientation(Pose.FACE_DOWN, -15f, 0f), config))
+        assertEquals(Evidence.MEDIUM, LyingJudge.evidence(Orientation.of(Pose.SIDEWAYS), config))
+        assertEquals(Evidence.NONE, LyingJudge.evidence(Orientation.of(Pose.UPRIGHT), config))
+        assertEquals(Evidence.WEAK, LyingJudge.evidence(Orientation.of(Pose.UPRIGHT), config.copy(strictMode = true)))
+        assertEquals(Evidence.NONE, LyingJudge.evidence(Orientation.UNKNOWN, config))
+    }
 }

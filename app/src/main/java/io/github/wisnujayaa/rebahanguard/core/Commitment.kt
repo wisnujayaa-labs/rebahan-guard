@@ -56,19 +56,30 @@ data class Commitment(
 }
 
 /**
- * The deliberately slow way out of a commitment. Impulses fade within minutes; a forced wait
- * plus typing a sentence gives the reflective part of the brain time to catch up.
+ * The deliberately slow way out (when no partner can be reached). The user waits, then types a
+ * long sentence that names exactly what they are trading away. Impulses fade within minutes; the
+ * sentence makes the cost of the choice impossible to skip over.
  */
 object EmergencyStop {
-    /** The countdown only runs while the app stays open and in front. */
-    const val WAIT_MS = 120_000L
+    const val PHRASE =
+        "Saya sadar bahwa saya memilih rebahan sambil main HP daripada belajar. " +
+            "Waktu yang saya buang malam ini tidak akan pernah kembali, " +
+            "dan saya sendiri yang akan menanggung akibatnya besok."
 
-    const val PHRASE = "aku memilih rebahan daripada tidur"
+    fun canStop(waitedMs: Long, typed: String, hasPartner: Boolean): Boolean =
+        waitedMs >= EmergencyStopRules.waitMs(hasPartner) && phraseMatches(typed)
 
-    fun canStop(waitedMs: Long, typed: String): Boolean = waitedMs >= WAIT_MS && phraseMatches(typed)
-
-    /** Case, accents, spacing and trailing punctuation don't matter; the words do. */
+    /** Case, accents, spacing and punctuation don't matter; every word does, in order. */
     fun phraseMatches(typed: String): Boolean = normalize(typed) == normalize(PHRASE)
+
+    /** How many leading words are already right — lets the UI show progress while typing. */
+    fun correctWords(typed: String): Int {
+        val target = normalize(PHRASE).split(" ")
+        val got = normalize(typed).split(" ").filter { it.isNotEmpty() }
+        return target.zip(got).takeWhile { (a, b) -> a == b }.count()
+    }
+
+    val wordCount: Int get() = normalize(PHRASE).split(" ").size
 
     private fun normalize(s: String): String =
         Normalizer.normalize(s, Normalizer.Form.NFKD)
@@ -77,6 +88,20 @@ object EmergencyStop {
             .replace(Regex("[^a-z0-9 ]"), " ")
             .trim()
             .replace(Regex("\\s+"), " ")
+}
+
+/** Short reminders shown on the lock screen, rotated so they don't become wallpaper. */
+object LockMessages {
+    val ALL = listOf(
+        "Tugasmu tidak akan selesai sambil rebahan.",
+        "Setiap menit di sini adalah menit yang tidak kamu pakai untuk belajar.",
+        "Besok pagi kamu akan berharap malam ini kamu belajar.",
+        "Kamu sendiri yang memasang penjaga ini, karena kamu tahu kamu bisa lebih baik.",
+        "Duduk, buka catatanmu. Satu halaman dulu saja.",
+        "Rebahan terasa sebentar. Penyesalannya terasa lebih lama.",
+    )
+
+    fun pick(index: Long): String = ALL[Math.floorMod(index, ALL.size.toLong()).toInt()]
 }
 
 /**

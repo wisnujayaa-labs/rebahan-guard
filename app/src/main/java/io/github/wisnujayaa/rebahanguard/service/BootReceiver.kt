@@ -18,7 +18,8 @@ import io.github.wisnujayaa.rebahanguard.R
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-        if (!CommitmentStore.isActive(context)) return
+        // Remind only if the guard was running under protection when the phone went down.
+        if (!CommitmentStore.isActive(context) && !(PartnerStore.hasPartner(context) && CommitmentStore.isSessionOpen(context))) return
 
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (manager.getNotificationChannel(CHANNEL_ID) == null) {
@@ -34,7 +35,7 @@ class BootReceiver : BroadcastReceiver() {
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_guard)
             .setContentTitle("Penjaga mati karena HP restart")
-            .setContentText("Komitmenmu masih berjalan. Ketuk untuk menyalakan penjaga lagi.")
+            .setContentText("Penjagamu masih seharusnya aktif. Ketuk untuk menyalakannya lagi.")
             .setContentIntent(open)
             .setOngoing(true)
             .setAutoCancel(true)

@@ -29,6 +29,9 @@ import androidx.lifecycle.LifecycleService
 import io.github.wisnujayaa.rebahanguard.MainActivity
 import io.github.wisnujayaa.rebahanguard.R
 import io.github.wisnujayaa.rebahanguard.core.Action
+import io.github.wisnujayaa.rebahanguard.core.CheckReport
+import io.github.wisnujayaa.rebahanguard.core.LockMessages
+import io.github.wisnujayaa.rebahanguard.core.Schedule
 import io.github.wisnujayaa.rebahanguard.core.FaceObservation
 import io.github.wisnujayaa.rebahanguard.core.GuardConfig
 import io.github.wisnujayaa.rebahanguard.core.GuardEngine
@@ -76,6 +79,27 @@ class GuardService : LifecycleService(), SensorEventListener {
     /** "Darurat" pressed on the lock screen: the guard pauses until this time. */
     private var emergencyUntilMs = 0L
 
+    private var schedule = Schedule.DEFAULT
+
+    /** The 10-second "sit up now" warning that precedes a (first) lock. */
+    private var warningUntilMs = 0L
+    private val warningTick = object : Runnable {
+        override fun run() {
+            if (!started || engine.phase != Phase.ALARMING) return
+            val left = warningUntilMs - SystemClock.elapsedRealtime()
+            if (left <= 0) {
+                engageLock()
+            } else {
+                overlay.showWarning(((left + 999) / 1000).toInt())
+                handler.postDelayed(this, 1_000)
+            }
+        }
+    }
+
+    private var lockStartedMs = 0L
+    private var lastGuardedNight = Int.MIN_VALUE
+    private var messageIndex = 0L
+
     private var gravitySensor: Sensor? = null
     private var accelerometerFilter: GravityFilter? = null
     private var sensorsRegistered = false
@@ -100,7 +124,12 @@ class GuardService : LifecycleService(), SensorEventListener {
                         stickySinceMs = SystemClock.elapsedRealtime()
                     }
                     perform(engine.onScreenOff())
+                    overlay.hideRingLight()
                     publish(screenOn = false)
+                }
+                Intent.ACTION_TIME_CHANGED, Intent.ACTION_TIMEZONE_CHANGED -> {
+                    // Moving the clock is a way around the schedule; make it visible.
+                    if (Protection.isProtected(this@GuardService)) CommitmentStore.recordClockChange(this@GuardService)
                 }
             }
         }
@@ -110,8 +139,8 @@ class GuardService : LifecycleService(), SensorEventListener {
         super.onStartCommand(intent, flags, startId)
 
         if (intent?.action == ACTION_STOP) {
-            // During a commitment the only way out is the emergency stop inside the app.
-            if (!CommitmentStore.isActive(this)) stopSelf()
+            // While protected (commitment, partner, schedule) the only way out is inside the app.
+            if (!Protection.isProtected(this)) stopSelf()
             return START_NOT_STICKY
         }
         if (started) return START_NOT_STICKY
@@ -137,6 +166,7 @@ class GuardService : LifecycleService(), SensorEventListener {
             strictMode = intent?.getBooleanExtra(EXTRA_STRICT, false) ?: false,
         )
         lockEnabled = intent?.getBooleanExtra(EXTRA_LOCK, true) ?: true
+        schedule = GuardSettings.load(this).schedule
         engine = GuardEngine(config)
         overlay = LockOverlay(this, onEmergency = ::onEmergency)
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -163,6 +193,8 @@ class GuardService : LifecycleService(), SensorEventListener {
             IntentFilter().apply {
                 addAction(Intent.ACTION_SCREEN_ON)
                 addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_TIME_CHANGED)
+                addAction(Intent.ACTION_TIMEZONE_CHANGED)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
@@ -218,13 +250,16 @@ class GuardService : LifecycleService(), SensorEventListener {
 
         val now = SystemClock.elapsedRealtime()
 
-        // Phone calls (including WhatsApp/VoIP) and the emergency pause always win.
-        if (isInCall() || now < emergencyUntilMs) {
+        // Phone calls (including WhatsApp/VoIP), the emergency pause and hours outside the
+        // schedule always win.
+        val outside = !schedule.isWithin(Protection.minuteOfDay())
+        if (isInCall() || now < emergencyUntilMs || outside) {
             releaseStickyLock()
             perform(engine.onScreenOff())
-            publish()
+            publish(outsideSchedule = outside)
             return
         }
+        markGuardedTonight()
 
         // On the lock screen the user is not using the phone: never trigger the camera there.
         val keyguardLocked = keyguardManager.isKeyguardLocked
@@ -254,6 +289,13 @@ class GuardService : LifecycleService(), SensorEventListener {
         if (engine.phase != Phase.ALARMING) overlay.hide()
     }
 
+    private fun markGuardedTonight() {
+        val night = StatsStore.tonight()
+        if (night == lastGuardedNight) return
+        lastGuardedNight = night
+        StatsStore.update(this) { it.copy(guarded = true) }
+    }
+
     private fun isInCall(): Boolean = when (audioManager.mode) {
         AudioManager.MODE_RINGTONE, AudioManager.MODE_IN_CALL, AudioManager.MODE_IN_COMMUNICATION -> true
         else -> false
@@ -263,6 +305,7 @@ class GuardService : LifecycleService(), SensorEventListener {
         if (!started) return
         emergencyUntilMs = SystemClock.elapsedRealtime() + EMERGENCY_PAUSE_MS
         CommitmentStore.recordEmergency(this)
+        StatsStore.update(this) { it.copy(emergencies = it.emergencies + 1) }
         stickyLock = false
         perform(engine.onScreenOff())
         overlay.hide()
@@ -281,27 +324,68 @@ class GuardService : LifecycleService(), SensorEventListener {
     private fun perform(action: Action) {
         when (action) {
             Action.NONE -> Unit
-            Action.START_CAMERA_CHECK -> faceChecker.check(this) { face -> onFaceResult(face) }
-            Action.CANCEL_CAMERA_CHECK -> faceChecker.cancel()
+            Action.START_CAMERA_CHECK -> faceChecker.check(
+                owner = this,
+                onDark = { if (lockEnabled) overlay.showRingLight() }, // light the face in a dark room
+            ) { face, report -> onFaceResult(face, report) }
+            Action.CANCEL_CAMERA_CHECK -> {
+                faceChecker.cancel()
+                overlay.hideRingLight()
+            }
             Action.START_ALARM -> {
-                val locked = lockEnabled && overlay.show()
-                alarm.start()
-                // With the lock screen up, a short alarm is enough; without it, ring longer.
-                handler.removeCallbacks(stopSound)
-                handler.postDelayed(stopSound, if (locked) LOCKED_SOUND_MS else UNLOCKED_SOUND_MS)
+                lockStartedMs = SystemClock.elapsedRealtime()
+                StatsStore.update(this) { it.copy(caught = it.caught + 1) }
                 updateNotification(getString(R.string.notif_alarm))
+                when {
+                    !lockEnabled || !overlay.canShow() -> {
+                        // No lock screen available: the alarm has to do all the work.
+                        alarm.start()
+                        handler.removeCallbacks(stopSound)
+                        handler.postDelayed(stopSound, UNLOCKED_SOUND_MS)
+                    }
+                    engine.lastLockWasRepeat || overlay.isShowing -> engageLock() // no second warning
+                    else -> {
+                        alarm.warn()
+                        warningUntilMs = lockStartedMs + WARNING_MS
+                        handler.removeCallbacks(warningTick)
+                        handler.post(warningTick)
+                    }
+                }
+                publish()
             }
             Action.STOP_ALARM -> {
                 handler.removeCallbacks(stopSound)
+                handler.removeCallbacks(warningTick)
+                warningUntilMs = 0
                 alarm.stop()
                 faceChecker.cancel() // a strict-mode re-check may still be running
+                overlay.hideRingLight()
+                overlay.hideWarning()
                 if (!stickyLock) overlay.hide()
+                if (lockStartedMs > 0) {
+                    val lockedMs = SystemClock.elapsedRealtime() - lockStartedMs
+                    StatsStore.update(this) { it.copy(lockedMs = it.lockedMs + lockedMs) }
+                    lockStartedMs = 0
+                }
                 updateNotification(getString(R.string.notif_watching))
             }
         }
     }
 
-    private fun onFaceResult(face: FaceObservation?) {
+    /** Warning over and still lying: cover the screen and sound the alarm. */
+    private fun engageLock() {
+        handler.removeCallbacks(warningTick)
+        warningUntilMs = 0
+        overlay.hideWarning()
+        overlay.show(LockMessages.pick(messageIndex++))
+        alarm.start()
+        handler.removeCallbacks(stopSound)
+        handler.postDelayed(stopSound, LOCKED_SOUND_MS)
+        publish()
+    }
+
+    private fun onFaceResult(face: FaceObservation?, report: CheckReport) {
+        overlay.hideRingLight()
         if (!started) return
         // A late result (after a watchdog timeout or screen-off) is ignored by the engine;
         // don't show it in the UI either.
@@ -315,18 +399,22 @@ class GuardService : LifecycleService(), SensorEventListener {
                 LyingJudge.headTiltDeg(engine.lastOrientation.inPlaneRotationDeg, it.rollDeg)
             },
             lying = engine.phase == Phase.ALARMING,
+            report = report,
+            lockReason = if (engine.phase == Phase.ALARMING) engine.lastLockReason else null,
         )
-        GuardStatusStore.update { it.copy(lastCheck = lastCheck) }
+        GuardStatusStore.update { it.copy(lastCheck = lastCheck, checks = (listOf(lastCheck) + it.checks).take(10)) }
         publish()
     }
 
-    private fun publish(screenOn: Boolean? = null) {
+    private fun publish(screenOn: Boolean? = null, outsideSchedule: Boolean = false) {
         GuardStatusStore.update {
             it.copy(
                 phase = engine.phase,
                 pose = engine.lastPose,
                 screenElevationDeg = engine.lastOrientation.screenElevationDeg,
                 screenOn = screenOn ?: it.screenOn,
+                outsideSchedule = outsideSchedule,
+                warningUntilElapsedMs = warningUntilMs,
             )
         }
     }
@@ -363,8 +451,8 @@ class GuardService : LifecycleService(), SensorEventListener {
             .setOngoing(true)
             .setContentIntent(openApp)
             .apply {
-                // No "stop" shortcut while a commitment is running.
-                if (!CommitmentStore.isActive(this@GuardService)) {
+                // No "stop" shortcut while the guard is protected.
+                if (!Protection.isProtected(this@GuardService)) {
                     addAction(0, getString(R.string.action_stop), stop)
                 }
             }
@@ -382,10 +470,11 @@ class GuardService : LifecycleService(), SensorEventListener {
             unregisterSensors()
             unregisterReceiver(screenReceiver)
             handler.removeCallbacks(stopSound)
+            handler.removeCallbacks(warningTick)
             alarm.stop()
-            overlay.hide()
+            overlay.hideAll()
             faceChecker.release()
-            if (!CommitmentStore.isActive(this)) CommitmentStore.onGuardStoppedCleanly(this)
+            CommitmentStore.onGuardStopped(this)
         }
         GuardStatusStore.update { it.copy(running = false, phase = Phase.WATCHING) }
         super.onDestroy()
@@ -404,6 +493,7 @@ class GuardService : LifecycleService(), SensorEventListener {
         private const val LOCKED_SOUND_MS = 8_000L
         private const val UNLOCKED_SOUND_MS = 60_000L
         private const val EMERGENCY_PAUSE_MS = 180_000L
+        private const val WARNING_MS = 10_000L
         const val DEFAULT_DELAY_SEC = 20
 
         /** Must be called while the app is visible (Android's while-in-use camera rule). */

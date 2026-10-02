@@ -49,6 +49,15 @@ class AlarmPlayer(private val context: Context, private val soundUri: Uri? = nul
         }
     }
 
+    /** A short double buzz: the heads-up before a lock. */
+    fun warn() {
+        try {
+            vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 250, 150, 250), -1))
+        } catch (e: Exception) {
+            Log.w(TAG, "Warning vibration failed", e)
+        }
+    }
+
     fun stop() {
         try {
             ringtone?.stop()
