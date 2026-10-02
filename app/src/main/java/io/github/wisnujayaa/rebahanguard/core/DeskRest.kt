@@ -17,8 +17,12 @@ object DeskRest {
     /** Must be nearly flat; a phone held above the face is often only tilted. */
     const val MAX_ELEVATION_DEG = -60f
 
-    fun resolve(orientation: Orientation, proximityNear: Boolean?, still: Boolean): Orientation =
-        if (isResting(orientation, proximityNear, still)) orientation.copy(pose = Pose.RESTING) else orientation
+    fun resolve(orientation: Orientation, proximityNear: Boolean?, still: Boolean): Orientation = when {
+        isResting(orientation, proximityNear, still) -> orientation.copy(pose = Pose.RESTING)
+        // Face up and perfectly still = lying on a surface, not held by someone on their stomach.
+        orientation.pose == Pose.PRONE && still -> orientation.copy(pose = Pose.FACE_UP)
+        else -> orientation
+    }
 
     fun isResting(orientation: Orientation, proximityNear: Boolean?, still: Boolean): Boolean =
         orientation.pose == Pose.FACE_DOWN &&

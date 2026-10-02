@@ -23,13 +23,21 @@ data class GuardSettings(
     val commitmentHours: Int = 0,
     /** Nightly window in which the guard is enforced (and can't simply be switched off). */
     val schedule: Schedule = Schedule.DEFAULT,
+    /** Detect lying on the stomach (tengkurap) with the phone facing up. */
+    val proneDetection: Boolean = true,
+    val proneElevationDeg: Float = PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG,
 ) {
+    /** The threshold the engine uses: NaN when prone detection is off. */
+    val effectiveProneDeg: Float get() = if (proneDetection) proneElevationDeg else Float.NaN
+
     fun sanitized() = copy(
         delaySec = SensorInput.sanitizeDelaySec(delaySec),
         lyingElevationDeg = SensorInput.sanitizeLyingElevationDeg(lyingElevationDeg),
         alarmSoundUri = AlarmSoundPolicy.sanitize(alarmSoundUri),
         commitmentHours = commitmentHours.coerceIn(0, Commitment.MAX_HOURS),
         schedule = schedule.sanitized(),
+        proneElevationDeg = SensorInput.sanitizeProneElevationDeg(proneElevationDeg).takeIf { it.isFinite() }
+            ?: PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG,
     )
 
     fun save(context: Context) {
@@ -44,6 +52,8 @@ data class GuardSettings(
             .putBoolean(KEY_SCHEDULE_ON, s.schedule.enabled)
             .putInt(KEY_SCHEDULE_START, s.schedule.startMinute)
             .putInt(KEY_SCHEDULE_END, s.schedule.endMinute)
+            .putBoolean(KEY_PRONE_ON, s.proneDetection)
+            .putFloat(KEY_PRONE_DEG, s.proneElevationDeg)
             .apply()
     }
 
@@ -58,6 +68,8 @@ data class GuardSettings(
         private const val KEY_SCHEDULE_ON = "schedule_on"
         private const val KEY_SCHEDULE_START = "schedule_start"
         private const val KEY_SCHEDULE_END = "schedule_end"
+        private const val KEY_PRONE_ON = "prone_on"
+        private const val KEY_PRONE_DEG = "prone_deg"
 
         private fun prefs(context: Context) =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -77,6 +89,8 @@ data class GuardSettings(
                         startMinute = p.getInt(KEY_SCHEDULE_START, Schedule.DEFAULT.startMinute),
                         endMinute = p.getInt(KEY_SCHEDULE_END, Schedule.DEFAULT.endMinute),
                     ),
+                    proneDetection = p.getBoolean(KEY_PRONE_ON, true),
+                    proneElevationDeg = p.getFloat(KEY_PRONE_DEG, PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG),
                 ).sanitized()
             } catch (e: ClassCastException) {
                 // A key stored with a different type (e.g. by an older version): start fresh.

@@ -32,6 +32,13 @@ enum class Pose(val isSuspicious: Boolean) {
     /** Flat on a surface, screen up (or lying on your stomach — not detectable yet). */
     FACE_UP(isSuspicious = false),
 
+    /**
+     * Screen facing up steeply while the phone is held: how a phone is used lying on the
+     * stomach (tengkurap) — but also how some people look down at it while sitting. Only the
+     * camera can tell (see [LyingJudge.isLying]); a still phone (on a desk) never counts.
+     */
+    PRONE(isSuspicious = true),
+
     /** Somewhere in between the clear cases above. */
     TILTED(isSuspicious = false),
 
@@ -69,6 +76,7 @@ data class Orientation(
                 Pose.FACE_DOWN -> -60f
                 Pose.RESTING -> -85f
                 Pose.FACE_UP -> 60f
+                Pose.PRONE -> 70f
                 Pose.TILTED -> 30f
                 Pose.UNKNOWN -> Float.NaN
                 else -> 0f
@@ -89,6 +97,9 @@ object PoseClassifier {
      * "looking up at the phone". Users can calibrate this to their own habits.
      */
     const val DEFAULT_LYING_ELEVATION_DEG = -5f
+
+    /** Default for prone detection; calibratable per person (see Calibrator.calibrateProne). */
+    const val DEFAULT_PRONE_ELEVATION_DEG = 55f
 
     /** Readings whose magnitude is below this are ignored (gravity should be ~9.81). */
     private const val MIN_MAGNITUDE = 1.0f
@@ -114,13 +125,16 @@ object PoseClassifier {
         y: Float,
         z: Float,
         lyingElevationDeg: Float = DEFAULT_LYING_ELEVATION_DEG,
-    ): Pose = measure(x, y, z, lyingElevationDeg).pose
+        proneElevationDeg: Float = Float.NaN,
+    ): Pose = measure(x, y, z, lyingElevationDeg, proneElevationDeg).pose
 
     fun measure(
         x: Float,
         y: Float,
         z: Float,
         lyingElevationDeg: Float = DEFAULT_LYING_ELEVATION_DEG,
+        /** Screen elevation at or above which a held phone may be used lying prone; NaN = off. */
+        proneElevationDeg: Float = Float.NaN,
     ): Orientation {
         // A glitching sensor can report NaN or Infinity. Never treat that as a real pose.
         if (!x.isFinite() || !y.isFinite() || !z.isFinite()) return Orientation.UNKNOWN
@@ -141,6 +155,7 @@ object PoseClassifier {
 
         val pose = when {
             elevation < lyingElevationDeg -> Pose.FACE_DOWN
+            proneElevationDeg.isFinite() && elevation >= proneElevationDeg -> Pose.PRONE
             abs(nx) > SIDEWAYS_X && abs(nz) < SIDEWAYS_MAX_Z -> Pose.SIDEWAYS
             ny > AXIS_DOMINANT -> Pose.UPRIGHT
             ny < -AXIS_DOMINANT -> Pose.UPSIDE_DOWN

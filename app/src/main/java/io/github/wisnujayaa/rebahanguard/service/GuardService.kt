@@ -247,6 +247,10 @@ class GuardService : LifecycleService(), SensorEventListener {
             triggerDelayMs = delaySec * 1_000L,
             lyingElevationDeg = lyingElevationDeg,
             strictMode = intent?.getBooleanExtra(EXTRA_STRICT, false) ?: false,
+            proneElevationDeg = SensorInput.sanitizeProneElevationDeg(
+                intent?.getFloatExtra(EXTRA_PRONE, PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG)
+                    ?: PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG
+            ),
         )
         lockEnabled = intent?.getBooleanExtra(EXTRA_LOCK, true) ?: true
         schedule = GuardSettings.load(this).schedule
@@ -412,6 +416,7 @@ class GuardService : LifecycleService(), SensorEventListener {
             values,
             deviceLocked = keyguardLocked,
             lyingElevationDeg = config.lyingElevationDeg,
+            proneElevationDeg = config.proneElevationDeg,
         )
         val orientation = DeskRest.resolve(measured, proximityNear, stillness.isStill(now))
         perform(engine.onPose(orientation, now))
@@ -829,6 +834,7 @@ class GuardService : LifecycleService(), SensorEventListener {
         private const val EXTRA_DELAY_SEC = "delay_sec"
         private const val EXTRA_LYING_ELEVATION = "lying_elevation_deg"
         private const val EXTRA_STRICT = "strict_mode"
+        private const val EXTRA_PRONE = "prone_elevation_deg"
         private const val EXTRA_ALARM_URI = "alarm_uri"
         private const val EXTRA_LOCK = "lock_screen"
         private const val LOCKED_SOUND_MS = 8_000L
@@ -864,6 +870,7 @@ class GuardService : LifecycleService(), SensorEventListener {
                 .putExtra(EXTRA_DELAY_SEC, settings.delaySec)
                 .putExtra(EXTRA_LYING_ELEVATION, settings.lyingElevationDeg)
                 .putExtra(EXTRA_STRICT, settings.strictMode)
+                .putExtra(EXTRA_PRONE, settings.effectiveProneDeg)
                 .putExtra(EXTRA_ALARM_URI, settings.alarmSoundUri)
                 .putExtra(EXTRA_LOCK, settings.lockScreen)
             try {

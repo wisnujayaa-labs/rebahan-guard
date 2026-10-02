@@ -128,6 +128,17 @@ work; staying needs a 30-second wait for one of **two 5-minute passes per day** 
 optional **strict mode** (Accessibility), which also backs out of this app's *App info*,
 *uninstall* and *Accessibility* pages during protected time.
 
+### Lying on your stomach (tengkurap)
+
+Face-up is also how people sit and look down at a phone, so gravity alone can't decide. Geometry
+can: lying prone, the face is right above the phone and parallel to the screen, so the front
+camera sees it **straight on** (ML Kit head pitch and yaw near 0°); sitting with the phone on a
+desk or in the lap, the upright face is seen **from below at an angle**. A held phone facing up
+beyond a calibratable angle (default 55°) triggers a camera check; a still phone (on a desk)
+never does; without a face it never locks. After a prone lock, a few degrees of tilt don't
+unlock it (**hysteresis**: 20° below the threshold, or put the phone down), and a camera recheck
+can only make releasing harder, never easier — a property the fuzz test caught and now guards.
+
 ### Face down on a desk vs. held above your face
 
 To the gravity sensor these are identical (screen towards the floor). `DeskRest` separates them
@@ -259,7 +270,7 @@ All decision logic is pure Kotlin, so it is tested on the JVM in well under a se
 
 ## Known limitations / roadmap
 
-- [ ] Lying on your stomach (phone face-up) is not detected yet — idea: proximity sensor + pitch angle
+- [x] Lying on your stomach (tengkurap): face-up phone held in hand → camera checks that the face is *frontal* to the screen (head pitch ≈ 0°), with release hysteresis
 - [ ] Very dark rooms can make face detection fail (screen light usually helps)
 - [ ] Instrumented (on-device) tests for the service and camera layer
 - [ ] Some OEM battery savers (Xiaomi, Oppo, vivo) may kill the service — whitelist the app

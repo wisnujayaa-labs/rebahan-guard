@@ -28,6 +28,7 @@ class GuardEngineFuzzTest {
         relockDelayMs = 2_000,
     )
     private val strictConfig = config.copy(strictMode = true)
+    private val noProneConfig = config.copy(proneElevationDeg = Float.NaN)
 
     private class Stats {
         var checks = 0
@@ -107,7 +108,8 @@ class GuardEngineFuzzTest {
             }
         }
 
-        private fun randomFace(): FaceObservation? = when (rnd.nextInt(8)) {
+        private fun randomFace(): FaceObservation? = when (rnd.nextInt(9)) {
+            8 -> FaceObservation(0.2f + rnd.nextFloat(), rnd.nextFloat() * 360f - 180f, rnd.nextFloat() * 120f - 60f, rnd.nextFloat() * 120f - 60f)
             0 -> null
             1 -> FaceObservation(Float.NaN, 0f)
             2 -> FaceObservation(0.4f, Float.POSITIVE_INFINITY)
@@ -217,6 +219,12 @@ class GuardEngineFuzzTest {
         assertTrue("watchdog=${stats.watchdogTimeouts}", stats.watchdogTimeouts > 10)
         assertTrue("alarmCaps=${stats.alarmCaps}", stats.alarmCaps > 10)
         assertTrue("spurious=${stats.spuriousResults}", stats.spuriousResults > 1_000)
+    }
+
+    @Test
+    fun invariantsHold_withProneDetectionOff() {
+        val stats = fuzz(seeds = 3_000..3_150, steps = 2_000, clockCanGoBackwards = false, cfg = noProneConfig)
+        assertTrue("checks=${stats.checks}", stats.checks > 500)
     }
 
     @Test

@@ -407,6 +407,7 @@ private fun GuardScreen() {
                     ScreenAngleDial(
                         elevationDeg = liveAngle,
                         thresholdDeg = settings.lyingElevationDeg,
+                        proneDeg = settings.effectiveProneDeg,
                         alarming = status.running && status.phase == Phase.ALARMING,
                     )
                     Text(
@@ -821,6 +822,8 @@ internal fun SettingsPanel(
         Divider()
         ThresholdRow(settings, editable, onChange)
         Divider()
+        ProneRow(settings, editable, onChange)
+        Divider()
         StrictRow(settings, editable, onChange)
         Divider()
         SoundRow(settings, editable, onChange)
@@ -1125,6 +1128,70 @@ private fun ThresholdRow(settings: GuardSettings, editable: Boolean, onChange: (
     }
 }
 
+// ------------------------------------------------------------------------------ prone
+
+@Composable
+private fun ProneRow(settings: GuardSettings, editable: Boolean, onChange: (GuardSettings) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var step by remember { mutableStateOf<String?>(null) }
+    var result by remember { mutableStateOf<Float?>(null) }
+    var failed by remember { mutableStateOf(false) }
+    var job by remember { mutableStateOf<Job?>(null) }
+
+    SettingRow(
+        "Deteksi tengkurap",
+        trailing = {
+            Switch(
+                checked = settings.proneDetection,
+                onCheckedChange = { onChange(settings.copy(proneDetection = it)) },
+                enabled = editable,
+                colors = SwitchDefaults.colors(checkedThumbColor = Tone.Ink, checkedTrackColor = Tone.Lamp),
+            )
+        },
+    ) {
+        Text(
+            "Saat tengkurap, layar menghadap ke atas seperti saat duduk menunduk. Jika HP dipegang " +
+                "dengan layar menghadap atas lebih dari ${settings.proneElevationDeg.roundToInt()}°, kamera " +
+                "memeriksa: wajah tepat di atas layar = tengkurap; wajah terlihat miring dari bawah = duduk. " +
+                "Setelah ketahuan, kunci baru terbuka kalau HP benar-benar diturunkan atau diletakkan.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Tone.Muted,
+        )
+        when {
+            step != null -> {
+                Text(step!!, style = MaterialTheme.typography.bodyMedium, color = Tone.Lamp)
+                TextButton(onClick = { job?.cancel(); step = null }) { Text("Batal") }
+            }
+            result != null -> {
+                Text("Batas tengkurap baru ${result!!.roundToInt()}°.", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { onChange(settings.copy(proneElevationDeg = result!!)); result = null }, shape = CircleShape) { Text("Simpan") }
+                    TextButton(onClick = { result = null }) { Text("Batal") }
+                }
+            }
+            else -> {
+                if (failed) Text("Posisi itu tidak terlihat seperti tengkurap (layar kurang menghadap ke atas). Coba lagi.",
+                    style = MaterialTheme.typography.bodySmall, color = Tone.Blanket)
+                TextButton(enabled = editable && settings.proneDetection, onClick = {
+                    failed = false
+                    job = scope.launch {
+                        for (s in CALIBRATION_COUNTDOWN_SEC downTo 1) {
+                            step = "Tengkurap dan pegang HP seperti biasa. Merekam dalam $s…"
+                            delay(1_000)
+                        }
+                        step = "Merekam… tahan posisi ${CALIBRATION_RECORD_MS / 1000} detik."
+                        val samples = recordScreenElevations(context, CALIBRATION_RECORD_MS)
+                        step = null
+                        result = Calibrator.calibrateProne(samples)
+                        failed = result == null
+                    }
+                }) { Text("Sesuaikan dengan caraku tengkurap") }
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------ alarm sound
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -1219,6 +1286,7 @@ private fun poseLabel(pose: Pose) = when (pose) {
     Pose.TILTED -> "agak miring"
     Pose.UNKNOWN -> "sedang dibaca sensornya"
     Pose.RESTING -> "tertelungkup diam di meja"
+    Pose.PRONE -> "menghadap ke atas di tangan, seperti saat tengkurap"
 }
 
 @android.annotation.SuppressLint("BatteryLife") // a self-control app is exactly the use case

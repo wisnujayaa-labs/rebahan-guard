@@ -48,6 +48,13 @@ data class GuardConfig(
      * your side with the phone held upright is caught too. Costs more camera checks.
      */
     val strictMode: Boolean = false,
+    /** Prone detection threshold (screen elevation); NaN = off. */
+    val proneElevationDeg: Float = PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG,
+    /**
+     * Hysteresis: after a prone lock, the phone must come this far below the threshold (or be
+     * put down) to unlock — tilting it a few degrees while still lying doesn't count.
+     */
+    val proneReleaseMarginDeg: Float = 20f,
 ) {
     init {
         require(triggerDelayMs >= 0) { "triggerDelayMs must be >= 0" }
@@ -74,6 +81,10 @@ data class GuardConfig(
                 lyingElevationDeg >= SensorInput.MIN_LYING_ELEVATION_DEG &&
                 lyingElevationDeg <= SensorInput.MAX_LYING_ELEVATION_DEG
         ) { "lyingElevationDeg out of range" }
+        require(proneElevationDeg.isNaN() || proneElevationDeg in SensorInput.MIN_PRONE_ELEVATION_DEG..SensorInput.MAX_PRONE_ELEVATION_DEG) {
+            "proneElevationDeg out of range"
+        }
+        require(proneReleaseMarginDeg.isFinite() && proneReleaseMarginDeg in 0f..45f) { "proneReleaseMarginDeg out of range" }
     }
 
     /** Whether holding the phone like this should start the countdown to a camera check. */
@@ -201,7 +212,7 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
                 }
             }
 
-            Phase.ALARMING -> onPoseWhileLocked(orientation.pose, nowMs)
+            Phase.ALARMING -> onPoseWhileLocked(orientation, nowMs)
 
             Phase.COOLDOWN -> {
                 if (!suspicious) {
@@ -216,11 +227,16 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         }
     }
 
-    private fun onPoseWhileLocked(pose: Pose, nowMs: Long): Action {
+    private fun onPoseWhileLocked(orientation: Orientation, nowMs: Long): Action {
+        val pose = orientation.pose
         // Unlock as soon as the phone is held in a way that can't be lying. For a normal lock that
         // means leaving the lying poses; for a strict lock (caught with the phone upright) it
         // means e.g. putting the phone down flat — sitting up is confirmed by the camera instead.
-        val calm = if (strictLock) !config.isSuspicious(pose) else !pose.isSuspicious
+        val calm = when {
+            proneLock -> isCalmAfterProne(orientation)
+            strictLock -> !config.isSuspicious(pose)
+            else -> !pose.isSuspicious
+        }
 
         return when {
             release.update(calm, nowMs) -> {
@@ -267,7 +283,10 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
             phase == Phase.ALARMING && lockRecheckInFlight -> {
                 lockRecheckInFlight = false
                 lastLockCheckMs = nowMs
-                if (verdict == Verdict.NOT_LYING) {
+                // The prone rule can only make releasing harder, never easier: rolling onto your
+                // back after a prone lock must not count as "sitting up".
+                val released = verdict == Verdict.NOT_LYING && (!proneLock || proneRecheckReleases(face))
+                if (released) {
                     enterCooldown(nowMs) // head is upright again: unlock
                     Action.STOP_ALARM
                 } else {
@@ -299,11 +318,40 @@ class GuardEngine(private val config: GuardConfig = GuardConfig()) {
         }
     }
 
+    /**
+     * After being caught lying prone: calm only once the phone is clearly lowered (sitting up
+     * to look at it) or put down still — not merely tilted a little below the threshold.
+     */
+    private fun isCalmAfterProne(o: Orientation): Boolean {
+        if (o.pose == Pose.RESTING) return true
+        val e = o.screenElevationDeg
+        if (!e.isFinite()) return false
+        val threshold = config.proneElevationDeg.takeIf { it.isFinite() } ?: return !o.pose.isSuspicious
+        if (o.pose == Pose.FACE_UP && e >= threshold) return true // still on a surface
+        return !o.pose.isSuspicious && e < threshold - config.proneReleaseMarginDeg
+    }
+
+    private var proneLock = false
+
+    /**
+     * A recheck during a prone lock judges by the prone rule whatever the phone's pose now:
+     * still facing the phone squarely while it is held steeply = still lying. Only a face seen
+     * at an angle (sitting up) releases it.
+     */
+    private fun proneRecheckReleases(face: FaceObservation?): Boolean {
+        if (face == null || !face.isValid || face.faceWidthRatio < config.minFaceWidthRatio) return false
+        val e = lastOrientation.screenElevationDeg
+        val threshold = config.proneElevationDeg
+        val stillSteep = e.isFinite() && threshold.isFinite() && e >= threshold - config.proneReleaseMarginDeg
+        return !(face.isFrontal && stillSteep)
+    }
+
     private fun lock(reason: LockReason, nowMs: Long): Action {
+        proneLock = lastOrientation.pose == Pose.PRONE
         val previous = lastCaughtMs
         lastLockWasRepeat = previous != null && nowMs - previous in 0 until config.relockWindowMs
         lastLockReason = reason
-        strictLock = !lastOrientation.pose.isSuspicious
+        strictLock = !lastOrientation.pose.isSuspicious || proneLock
         lastCaughtMs = nowMs
         unconfirmedSinceMs = null
         enter(Phase.ALARMING, nowMs)

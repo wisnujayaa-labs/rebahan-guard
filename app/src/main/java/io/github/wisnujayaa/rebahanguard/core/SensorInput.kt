@@ -46,14 +46,23 @@ object SensorInput {
         values: FloatArray?,
         deviceLocked: Boolean,
         lyingElevationDeg: Float = PoseClassifier.DEFAULT_LYING_ELEVATION_DEG,
+        proneElevationDeg: Float = Float.NaN,
     ): Orientation {
         if (deviceLocked) return Orientation.UNKNOWN
         if (values == null || values.size < 3) return Orientation.UNKNOWN
-        return PoseClassifier.measure(values[0], values[1], values[2], lyingElevationDeg)
+        return PoseClassifier.measure(values[0], values[1], values[2], lyingElevationDeg, proneElevationDeg)
     }
 
     fun toPose(values: FloatArray?, deviceLocked: Boolean): Pose =
         toOrientation(values, deviceLocked).pose
+
+    const val MIN_PRONE_ELEVATION_DEG = 40f
+    const val MAX_PRONE_ELEVATION_DEG = 85f
+
+    /** NaN (off) stays NaN; anything else is clamped into the supported range. */
+    fun sanitizeProneElevationDeg(raw: Float): Float =
+        if (raw.isNaN()) Float.NaN else if (!raw.isFinite()) PoseClassifier.DEFAULT_PRONE_ELEVATION_DEG
+        else raw.coerceIn(MIN_PRONE_ELEVATION_DEG, MAX_PRONE_ELEVATION_DEG)
 
     const val MIN_DELAY_SEC = 5
     const val MAX_DELAY_SEC = 120

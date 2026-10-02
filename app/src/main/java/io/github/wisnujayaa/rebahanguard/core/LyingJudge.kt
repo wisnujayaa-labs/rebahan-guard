@@ -10,10 +10,22 @@ import kotlin.math.abs
  * @param rollDeg in-plane rotation of that face inside the image (ML Kit's Euler Z),
  *   measured in the phone's natural portrait frame. ~0° = face aligned with the phone's long axis.
  */
-data class FaceObservation(val faceWidthRatio: Float, val rollDeg: Float) {
+data class FaceObservation(
+    val faceWidthRatio: Float,
+    val rollDeg: Float,
+    /** Head pitch relative to the camera (ML Kit euler X): 0 = facing the camera straight on. */
+    val pitchDeg: Float = 0f,
+    /** Head yaw relative to the camera (ML Kit euler Y): 0 = not turned left or right. */
+    val yawDeg: Float = 0f,
+) {
     /** False for values a real detector could never produce (NaN, Infinity, negative size). */
     val isValid: Boolean
-        get() = faceWidthRatio.isFinite() && faceWidthRatio > 0f && rollDeg.isFinite()
+        get() = faceWidthRatio.isFinite() && faceWidthRatio > 0f && rollDeg.isFinite() &&
+            pitchDeg.isFinite() && yawDeg.isFinite()
+
+    /** Facing the screen squarely, as when the face is right above a face-up phone. */
+    val isFrontal: Boolean
+        get() = kotlin.math.abs(pitchDeg) <= LyingJudge.PRONE_MAX_PITCH_DEG && kotlin.math.abs(yawDeg) <= LyingJudge.PRONE_MAX_YAW_DEG
 }
 
 /**
@@ -47,13 +59,17 @@ enum class Evidence {
 }
 
 object LyingJudge {
+    /** How squarely the face must look into the camera to count as "right above the phone". */
+    const val PRONE_MAX_PITCH_DEG = 22f
+    const val PRONE_MAX_YAW_DEG = 30f
+
     fun verdict(orientation: Orientation, face: FaceObservation?, config: GuardConfig): Verdict {
         if (face == null || !face.isValid || face.faceWidthRatio < config.minFaceWidthRatio) {
             return Verdict.NO_EVIDENCE
         }
         if (isLying(orientation, face, config)) return Verdict.LYING
         return when (orientation.pose) {
-            Pose.FACE_UP -> Verdict.NOT_LYING
+            Pose.FACE_UP, Pose.PRONE -> Verdict.NOT_LYING
             Pose.SIDEWAYS, Pose.UPRIGHT, Pose.UPSIDE_DOWN, Pose.TILTED ->
                 // A visible face but an undecidable angle (phone held diagonally, or flat) is
                 // not proof of sitting.
@@ -70,6 +86,8 @@ object LyingJudge {
         val pose = orientation.pose
         return when {
             pose == Pose.FACE_DOWN && orientation.screenElevationDeg < config.strongElevationDeg -> Evidence.STRONG
+            // Face-up is also how people sit and look down: never lock it without the camera.
+            pose == Pose.PRONE -> Evidence.WEAK
             pose.isSuspicious -> Evidence.MEDIUM
             config.isSuspicious(pose) -> Evidence.WEAK
             else -> Evidence.NONE
@@ -106,6 +124,11 @@ object LyingJudge {
                 val tilt = headTiltDeg(orientation.inPlaneRotationDeg, face.rollDeg)
                 tilt != null && tilt >= config.minHeadTiltDeg
             }
+
+            // Lying on the stomach: the phone faces up and the face is right above it, parallel
+            // to the screen, so the camera sees it squarely. Sitting and looking down at a phone
+            // on a desk or in the lap, the face is upright and seen from below at an angle.
+            Pose.PRONE -> face.isFrontal
 
             Pose.FACE_UP, Pose.UNKNOWN, Pose.RESTING -> false
         }

@@ -49,12 +49,14 @@ fun ScreenAngleDial(
     thresholdDeg: Float,
     alarming: Boolean,
     modifier: Modifier = Modifier,
+    /** Prone threshold: the top of the arc above it is a "lying" zone too. NaN = off. */
+    proneDeg: Float = Float.NaN,
 ) {
     val p = Tone.current // captured here: the Canvas lambda below is not composable
     val hasReading = elevationDeg.isFinite()
     val target = if (hasReading) elevationDeg.coerceIn(-90f, 90f) else 0f
     val angle by animateFloatAsState(target, animationSpec = tween(150), label = "screenAngle")
-    val inBed = hasReading && elevationDeg < thresholdDeg
+    val inBed = hasReading && (elevationDeg < thresholdDeg || (proneDeg.isFinite() && elevationDeg >= proneDeg))
 
     val reducedMotion = rememberReducedMotion()
     val pulse by rememberInfiniteTransition(label = "alarm").animateFloat(
@@ -92,6 +94,11 @@ fun ScreenAngleDial(
 
             // Compose measures arc angles clockwise from 3 o'clock, so elevation e ↦ angle -e.
             drawArc(p.DuskHigh, -90f, 90f - thr, useCenter = true, topLeft = boxTopLeft, size = box)
+            if (proneDeg.isFinite()) {
+                // Face up steeply in the hand: the tengkurap zone (confirmed by the camera).
+                val pr = proneDeg.coerceIn(-90f, 90f)
+                drawArc(p.Blanket.copy(alpha = blanketAlpha * 0.6f), -90f, 90f - pr, useCenter = true, topLeft = boxTopLeft, size = box)
+            }
             drawArc(
                 p.Blanket.copy(alpha = blanketAlpha), -thr, 90f + thr,
                 useCenter = true, topLeft = boxTopLeft, size = box,

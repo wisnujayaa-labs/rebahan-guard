@@ -58,6 +58,18 @@ object Calibrator {
         )
     }
 
+    /**
+     * The prone threshold from a recording of the user lying on their stomach with the phone:
+     * a little below their lowest typical angle, so their real habit is caught. Null if the
+     * recording doesn't look prone at all (screen not facing up enough) or is too short.
+     */
+    fun calibrateProne(proneDeg: List<Float>): Float? {
+        val prone = proneDeg.filter { it.isFinite() && it in -90f..90f }.sorted()
+        if (prone.size < MIN_SAMPLES) return null
+        if (percentile(prone, 0.5f) < SensorInput.MIN_PRONE_ELEVATION_DEG) return null
+        return SensorInput.sanitizeProneElevationDeg(percentile(prone, 0.10f) - 3f)
+    }
+
     /** Linear-interpolated percentile of an already sorted, non-empty list. */
     internal fun percentile(sorted: List<Float>, p: Float): Float {
         require(sorted.isNotEmpty())

@@ -151,6 +151,8 @@ class FaceChecker(private val context: Context, private val config: GuardConfig)
                     val observation = FaceObservation(
                         faceWidthRatio = largest.boundingBox.width().toFloat() / uprightWidth,
                         rollDeg = largest.headEulerAngleZ,
+                        pitchDeg = largest.headEulerAngleX,
+                        yawDeg = largest.headEulerAngleY,
                     )
                     mainHandler.post { onObservation(s, observation) }
                 }
