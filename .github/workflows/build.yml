@@ -112,3 +112,32 @@ jobs:
             app/build/reports/tests/
             app/build/reports/lint-results-debug.*
           retention-days: 14
+
+  # Puts the latest screenshots on the `screenshots` branch so they can be viewed (and fetched)
+  # without downloading an artifact. A separate job: only it gets write access, never the build,
+  # and only for pushes to main (never for pull requests).
+  publish-screenshots:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: screenshots
+          path: shots
+
+      - name: Push to the screenshots branch
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          cd shots
+          git init -q -b screenshots
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '# UI screenshots\n\nRendered by CI from %s.\n' "$GITHUB_SHA" > README.md
+          git add -A
+          git commit -qm "Screenshots for $GITHUB_SHA"
+          git push -q --force "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:screenshots
