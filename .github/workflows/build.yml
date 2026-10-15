@@ -27,14 +27,14 @@ jobs:
 
       # Supply-chain check: refuse to run a gradle-wrapper.jar that isn't an official
       # Gradle release (a tampered wrapper would execute arbitrary code during the build).
-      - uses: gradle/actions/wrapper-validation@v4
+      - uses: gradle/actions/wrapper-validation@v6
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       # Files uploaded through the GitHub website lose their "executable" flag.
       - name: Make gradlew executable
