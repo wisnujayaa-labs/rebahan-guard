@@ -1,9 +1,9 @@
 [versions]
 agp = "8.7.3"
 kotlin = "2.0.21"
-coreKtx = "1.15.0"
+coreKtx = "1.19.1"
 activityCompose = "1.9.3"
-composeBom = "2024.12.01"
+composeBom = "2026.09.00"
 lifecycle = "2.8.7"
 coroutines = "1.9.0"
 camerax = "1.4.1"
